@@ -1,8 +1,10 @@
 {
-  "sandbox": {
-    "enabled": true
-  },
   "permissions": {
+    "allow": [
+      "Bash(npm test)",
+      "Bash(npm run typecheck)",
+      "Bash(npm run dev)"
+    ],
     "deny": [
       "Read(./.env)",
       "Read(./.env.*)",
@@ -13,7 +15,10 @@
       "Read(~/.wrangler/**)",
       "Read(~/.config/gh/**)",
       "Read(~/.ssh/**)",
-      "Read(~/.git-credentials)"
+      "Read(~/.git-credentials)",
+      "Bash(rm -rf:*)",
+      "Bash(sudo:*)",
+      "Bash(chmod 777:*)"
     ],
     "ask": [
       "Bash(git push:*)",
@@ -28,11 +33,12 @@
       "Bash(gh:*)",
       "Bash(curl:*)",
       "Bash(wget:*)"
-    ],
-    "allow": [
-      "Bash(npm test)",
-      "Bash(npm run typecheck)",
-      "Bash(npm run dev)"
     ]
+  },
+  "sandbox": {
+    "enabled": true
+  },
+  "enabledPlugins": {
+    "security-guidance@claude-plugins-official": true
   }
 }
