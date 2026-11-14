@@ -1,0 +1,4 @@
+# Copy to .dev.vars for local development (.dev.vars is gitignored and Claude can't read it).
+# Local-only: skip Access on localhost and use fake TickTick/Calendar data.
+DEV_SKIP_ACCESS=true
+USE_FAKES=true

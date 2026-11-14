@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Blocks a commit if gitleaks finds a secret in the staged changes.
+set -euo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "gitleaks not installed: run 'sudo apt install -y gitleaks'. Commit blocked to be safe." >&2
+  exit 1
+fi
+
+# Newer gitleaks: `git --staged`. Older (Ubuntu's package): `protect --staged`.
+if gitleaks git --help >/dev/null 2>&1; then
+  gitleaks git --staged --redact --verbose
+else
+  gitleaks protect --staged --redact --verbose
+fi

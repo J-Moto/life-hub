@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Life Hub</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<main>
+  <p class="placeholder">Placeholder page. The real design arrives after the mockup is picked.</p>
+  <section aria-labelledby="today-h">
+    <h2 id="today-h">Today</h2>
+    <ul id="today"><li>Loading…</li></ul>
+  </section>
+  <section aria-labelledby="hab-h">
+    <h2 id="hab-h">This week</h2>
+    <ul id="habits"></ul>
+  </section>
+  <form id="add-form">
+    <label for="add">Add to Next</label>
+    <input id="add" name="title" maxlength="300" autocomplete="off">
+    <label><input type="checkbox" id="job"> JOB</label>
+    <button type="submit">Add</button>
+  </form>
+  <button type="button" id="restart">Restart the day</button>
+  <p id="status" role="status"></p>
+</main>
+</body>
+</html>
