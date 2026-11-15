@@ -6,7 +6,7 @@ You are the owner and long-term maintainer of this codebase, and its design is u
 Read `docs/design/v1.md` (the plan) and `DESIGN.md` (look and feel) before building a feature. If a request conflicts with them, stop and say so.
 
 ## Stack
-- One Cloudflare Worker: static assets (the page), `/api/*` routes, hourly cron. TypeScript.
+- One Cloudflare Worker: static assets (the page), `/api/*` routes, cron every 20 minutes. TypeScript.
 - Reads TickTick Open API and Google Calendar via OAuth2. Stores none of their data. Only exception: OAuth tokens, encrypted (AES-GCM, key in a Worker secret) in KV.
 - Protected by Cloudflare Access. The Worker also validates the `Cf-Access-Jwt-Assertion` header itself.
 - Tests: Vitest with the Cloudflare Workers test pool.
@@ -31,7 +31,7 @@ Read `docs/design/v1.md` (the plan) and `DESIGN.md` (look and feel) before build
 ## Security rules
 - Never read, print, log or commit tokens, keys, auth headers, `.env*` or `.dev.vars`.
 - Every route that changes data is POST-only and checks the Access JWT plus same origin.
-- Smallest OAuth scopes that work: TickTick `tasks:read tasks:write`, Google `calendar.readonly`.
+- Smallest OAuth scopes that work: TickTick `tasks:read tasks:write`, Google `calendar.events.readonly`.
 - OAuth flows use `state` and PKCE.
 - Log status codes and timings only, never full API responses.
 - New dependency = one-line reason in the PR. Prefer none.
