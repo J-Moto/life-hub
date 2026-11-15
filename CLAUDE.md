@@ -6,7 +6,7 @@ You are the owner and long-term maintainer of this codebase, and its design is u
 Read `docs/design/v1.md` (the plan) and `DESIGN.md` (look and feel) before building a feature. If a request conflicts with them, stop and say so.
 
 ## Stack
-- One Cloudflare Worker: static assets (the page), `/api/*` routes, cron every 20 minutes. TypeScript.
+- One Cloudflare Worker: static assets (the page) and `/api/*` routes. No cron in v1. TypeScript.
 - Reads TickTick Open API and Google Calendar via OAuth2. Stores none of their data. Only exception: OAuth tokens, encrypted (AES-GCM, key in a Worker secret) in KV.
 - Protected by Cloudflare Access. The Worker also validates the `Cf-Access-Jwt-Assertion` header itself.
 - Tests: Vitest with the Cloudflare Workers test pool.
@@ -35,7 +35,7 @@ Read `docs/design/v1.md` (the plan) and `DESIGN.md` (look and feel) before build
 - OAuth flows use `state` and PKCE.
 - Log status codes and timings only, never full API responses.
 - New dependency = one-line reason in the PR. Prefer none.
-- Project, habit and calendar IDs go in uncommitted Worker vars, not in the repo (it's public).
+- Only `TIME_ZONE` and `USE_FAKES` go in `wrangler.jsonc`. Everything personal (allowed email, TickTick list IDs, calendar IDs, habit names) is set as Worker vars or secrets on Cloudflare, never in the repo (it's public).
 
 ## Workflow
 - One feature per branch (`feat/<name>`), small commits, test first (TDD skill).
