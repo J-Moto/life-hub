@@ -32,6 +32,9 @@ Built later with the Claude API and a scheduled agent, after v1 is used daily. N
 - **ADHD strategies per task:** tiny first step, music during the task, body doubling, timers, "just start for a few minutes", environment setup. Usually avoid suggesting fun-before-boring or rewards-after-completion (they tend not to work for me), but this is not a strict ban.
 - **Due-date awareness:** shows what's due soon. Restart flags due-soon tasks instead of quietly moving them. Helps decide skip or make-up when I fall behind.
 - **Sunday Reset help:** reviews Someday, Scrap and stuck tasks, re-ranks priorities over time, and batch-reviews the auto-set dates.
+- **Progress at four zoom levels:** today, this week (or rolling 7 days), this month and this year, for habits and possibly other goals. Why it works for me: Apple Health shows daily steps with weekly and yearly averages, so a low day just means a bigger day tomorrow, never a reason to quit.
+- **Judgment on what counts as progress:** decides on its own whether a task is (a) a plain one-off, (b) one of several tasks toward a bigger progress goal, or (c) something to break into progress steps.
+- **Time-window budgets:** shows "time left in this window", like Claude's usage reset countdown, which makes me want to use the current window well. The judgment layer decides which goals get a window, how long it is and when it resets. The Work Block countdown in v1's "Up next" banner is a small first version of this.
 - **Tone:** no guilt, ever.
 
 **Open questions (decide when this is designed):**
