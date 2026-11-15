@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { addToNext, completeTask, getToday, restart, setDevFakes, type Config, type Sources } from "../src/api";
 import { FakeCalendarSource, FakeTaskSource } from "../src/sources/fakes";
+import type { TaskReader } from "../src/sources/types";
 
 const cfg: Config = {
   todayProjectId: "today",
@@ -11,7 +12,15 @@ const cfg: Config = {
 };
 
 let tasks: FakeTaskSource;
+let reads: TaskReader;
 let sources: Sources;
+
+/** The read part only. A handler that tries to write through it throws. */
+const readOnly = (t: FakeTaskSource): TaskReader => ({
+  listOpenTasks: (projectId) => t.listOpenTasks(projectId),
+  listHabits: (habitIds) => t.listHabits(habitIds),
+  listCheckins: (habitIds, from, to) => t.listCheckins(habitIds, from, to),
+});
 
 beforeEach(() => {
   tasks = new FakeTaskSource({
@@ -23,16 +32,10 @@ beforeEach(() => {
     habits: [{ id: "h1", name: "Job action" }],
     checkins: [{ habitId: "h1", stamp: "20261109" }],
   });
-  sources = { tasks, calendar: new FakeCalendarSource([]) };
+  reads = readOnly(tasks);
+  sources = { tasks: reads, calendar: new FakeCalendarSource([]), taskWriter: tasks };
   setDevFakes(null);
 });
-
-const jsonReq = (body: unknown) =>
-  new Request("https://hub.example.com/api/next", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
 
 describe("GET /api/today", () => {
   it("returns Today tasks with JOB flags and habit %", async () => {
@@ -60,36 +63,37 @@ describe("GET /api/today", () => {
 
 describe("complete", () => {
   it("completes a Today task", async () => {
-    expect((await completeTask(sources, cfg, "a")).status).toBe(200);
+    expect((await completeTask(reads, tasks, cfg, "a")).status).toBe(200);
     expect(tasks.tasks.find((t) => t.id === "a")!.done).toBe(true);
   });
   it("refuses tasks that aren't in Today", async () => {
-    expect((await completeTask(sources, cfg, "x")).status).toBe(404);
+    expect((await completeTask(reads, tasks, cfg, "x")).status).toBe(404);
     expect(tasks.tasks.find((t) => t.id === "x")!.done).toBe(false);
   });
   it("refuses odd ids", async () => {
-    expect((await completeTask(sources, cfg, "../a")).status).toBe(400);
+    expect((await completeTask(reads, tasks, cfg, "../a")).status).toBe(400);
   });
 });
 
 describe("add to Next", () => {
   it("adds a cleaned task with JOB prefix", async () => {
-    const res = await addToNext(sources, cfg, jsonReq({ title: "  open resume  doc ", job: true }));
+    const res = await addToNext(tasks, cfg, { title: "  open resume  doc ", job: true });
     expect(res.status).toBe(201);
     expect(tasks.tasks.at(-1)).toMatchObject({ projectId: "next", title: "JOB: open resume doc" });
   });
   it("rejects bad bodies", async () => {
-    expect((await addToNext(sources, cfg, jsonReq({ title: "" }))).status).toBe(400);
-    expect((await addToNext(sources, cfg, jsonReq(["x"]))).status).toBe(400);
-    const notJson = new Request("https://hub.example.com/api/next", { method: "POST", body: "title=x" });
-    expect((await addToNext(sources, cfg, notJson)).status).toBe(400);
+    // The body arrives already parsed; "not JSON" and "not an object" are the router's job.
+    expect((await addToNext(tasks, cfg, { title: "" })).status).toBe(400);
+    expect((await addToNext(tasks, cfg, {})).status).toBe(400);
+    expect((await addToNext(tasks, cfg, { title: 42 })).status).toBe(400);
+    expect(tasks.tasks.length).toBe(3);
   });
 });
 
 describe("restart", () => {
   it("moves Today's leftovers to Next and adds one Minimum task, deleting nothing", async () => {
     const before = tasks.tasks.length;
-    const body = (await (await restart(sources, cfg)).json()) as any;
+    const body = (await (await restart(reads, tasks, cfg)).json()) as any;
     expect(body).toMatchObject({ ok: true, moved: 2 });
     const today = await tasks.listOpenTasks("today");
     expect(today.map((t) => t.title)).toEqual(["JOB: save 1 posting"]);
@@ -98,8 +102,8 @@ describe("restart", () => {
   });
 
   it("is safe to tap twice", async () => {
-    await restart(sources, cfg);
-    const body = (await (await restart(sources, cfg)).json()) as any;
+    await restart(reads, tasks, cfg);
+    const body = (await (await restart(reads, tasks, cfg)).json()) as any;
     expect(body).toMatchObject({ ok: true, moved: 0 });
     expect((await tasks.listOpenTasks("today")).map((t) => t.title)).toEqual(["JOB: save 1 posting"]);
   });
@@ -110,7 +114,7 @@ describe("restart", () => {
       if (id === "b") throw new Error("down");
       return realMove(id, from, to);
     };
-    const res = await restart(sources, cfg);
+    const res = await restart(reads, tasks, cfg);
     expect(res.status).toBe(502);
     expect(await res.json()).toMatchObject({ ok: false, moved: 1, failed: 1 });
   });
