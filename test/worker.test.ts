@@ -17,16 +17,16 @@ describe("Worker front door", () => {
   });
 
   it("refuses the API without Access", async () => {
-    expect((await SELF.fetch("https://hub.example.com/api/today")).status).toBe(401);
+    expect((await SELF.fetch("https://hub.example.com/api/tasks")).status).toBe(401);
   });
 
   it("refuses a spoofed localhost Host header", async () => {
-    const res = await SELF.fetch("http://localhost:8787/api/today", { headers: { "CF-Connecting-IP": "192.168.1.50" } });
+    const res = await SELF.fetch("http://localhost:8787/api/tasks", { headers: { "CF-Connecting-IP": "192.168.1.50" } });
     expect(res.status).toBe(401);
   });
 
   it("refuses a forged token", async () => {
-    const res = await SELF.fetch("https://hub.example.com/api/today", {
+    const res = await SELF.fetch("https://hub.example.com/api/tasks", {
       headers: { "Cf-Access-Jwt-Assertion": "a.b.c" },
     });
     expect(res.status).toBe(401);
@@ -106,9 +106,9 @@ describe("Worker, past the Access check", () => {
   afterEach(() => setDevFakes(null));
 
   it("serves a read route, with the security headers", async () => {
-    const res = await worker.fetch(new Request(`${LOCAL}/api/today`, { headers: LOOPBACK }), devEnv);
+    const res = await worker.fetch(new Request(`${LOCAL}/api/tasks`, { headers: LOOPBACK }), devEnv);
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ today: [{ id: "a", title: "Finish video", job: false }], problems: [] });
+    expect(await res.json()).toMatchObject({ tasks: [{ id: "a", title: "Finish video", job: false }] });
     expect(res.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
     expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
   });

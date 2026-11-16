@@ -43,6 +43,8 @@ const WRITE_ROUTES = [
 
 const JSON_FROM_HUB = { Origin: HUB, "Content-Type": "application/json" };
 
+const READ_ROUTES = ["/api/tasks", "/api/calendar", "/api/habits"];
+
 let tasks: FakeTaskSource;
 
 /** The read side of the fake data. The write side is handed to setDevFakes separately. */
@@ -73,7 +75,9 @@ describe("Access", () => {
       const request = new Request(`${HUB}${path}`, { method: "POST", headers: JSON_FROM_HUB, body });
       expect((await routeRequest(request, fakesOn, forged)).status).toBe(401);
     }
-    expect((await routeRequest(new Request(`${HUB}/api/today`), fakesOn, forged)).status).toBe(401);
+    for (const path of READ_ROUTES) {
+      expect((await routeRequest(new Request(`${HUB}${path}`), fakesOn, forged)).status).toBe(401);
+    }
   }
 
   it("refuses a caller that has no verified Access result", async () => {
@@ -93,8 +97,67 @@ describe("Access", () => {
   });
 
   it("serves the caller whose Access result verifyAccess produced", async () => {
-    const res = await routeRequest(new Request(`${HUB}/api/today`), fakesOn, OWNER);
-    expect(res.status).toBe(200);
+    for (const path of READ_ROUTES) {
+      const res = await routeRequest(new Request(`${HUB}${path}`), fakesOn, OWNER);
+      expect(res.status).toBe(200);
+    }
+  });
+});
+
+describe("read routes", () => {
+  const get = (path: string, env: Env = fakesOn) => routeRequest(new Request(`${HUB}${path}`), env, OWNER);
+
+  it("serves fake data in all three sections, with no setting but USE_FAKES", async () => {
+    setDevFakes(null); // the built-in sample data, as `npm run dev` uses it
+    const tasks = (await (await get("/api/tasks")).json()) as any;
+    expect(tasks.tasks.length).toBeGreaterThan(0);
+    expect(tasks.writes).toEqual({ complete: true, next: true, restart: true });
+    const calendar = (await (await get("/api/calendar")).json()) as any;
+    expect(Array.isArray(calendar.events)).toBe(true);
+    const habits = (await (await get("/api/habits")).json()) as any;
+    expect(habits.habits.length).toBeGreaterThan(0);
+  });
+
+  it("/api/tasks reports the write routes that are switched on", async () => {
+    setDevFakes(reads(), { completeTask: (p, t) => tasks.completeTask(p, t) });
+    const body = (await (await get("/api/tasks")).json()) as any;
+    expect(body.writes).toEqual({ complete: true, next: false, restart: false });
+    setDevFakes(reads());
+    const none = (await (await get("/api/tasks")).json()) as any;
+    expect(none.writes).toEqual({ complete: false, next: false, restart: false });
+  });
+
+  it("the old /api/today is gone", async () => {
+    const res = await get("/api/today");
+    expect(res.status).toBe(404);
+  });
+
+  it("the calendar answers when TickTick is not connected", async () => {
+    setDevFakes({ tasks: null, calendar: new FakeCalendarSource([]) });
+    const calendar = await get("/api/calendar");
+    expect(calendar.status).toBe(200);
+    for (const path of ["/api/tasks", "/api/habits"]) {
+      const res = await get(path);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "not_connected", provider: "ticktick" });
+    }
+  });
+
+  it("tasks answer when Google is not connected", async () => {
+    setDevFakes({ tasks: readOnly(tasks), calendar: null }, tasks);
+    expect((await get("/api/tasks")).status).toBe(200);
+    expect((await get("/api/habits")).status).toBe(200);
+    const res = await get("/api/calendar");
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "not_connected", provider: "google" });
+  });
+
+  it("are GET only: a POST to a read path is not found and writes nothing", async () => {
+    for (const path of READ_ROUTES) {
+      const res = await post(fakesOn, path, JSON_FROM_HUB, "{}");
+      expect(res.status).toBe(404);
+    }
+    expectNothingWritten();
   });
 });
 
@@ -328,9 +391,27 @@ describe("write gate", () => {
     expect((await tasks.listOpenTasks("today")).map((t) => t.title)).toEqual([MINIMUM]);
   });
 
-  it("answers not_connected for a read route when fake data is off", async () => {
-    const res = await routeRequest(new Request(`${HUB}/api/today`), fakesOff, OWNER);
-    expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ error: "not_connected", provider: "ticktick" });
+  it("answers not_configured for each write route when a project ID is an empty string", async () => {
+    const empty = { ...fakesOn, TICKTICK_TODAY_PROJECT_ID: "", TICKTICK_NEXT_PROJECT_ID: "next" } as Env;
+    for (const { path, body } of WRITE_ROUTES) {
+      const res = await post(empty, path, JSON_FROM_HUB, body);
+      expect(res.status, path).toBe(503);
+      expect(await res.json(), path).toEqual({ error: "not_configured" });
+    }
+    expectNothingWritten();
+  });
+
+  it("answers not_connected for each read route when fake data is off", async () => {
+    // Providers are resolved before settings are read, so not_connected comes first.
+    const providerFor: Record<string, string> = {
+      "/api/tasks": "ticktick",
+      "/api/habits": "ticktick",
+      "/api/calendar": "google",
+    };
+    for (const path of READ_ROUTES) {
+      const res = await routeRequest(new Request(`${HUB}${path}`), fakesOff, OWNER);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "not_connected", provider: providerFor[path] });
+    }
   });
 });

@@ -4,17 +4,22 @@ import { isSameOrigin } from "./auth/origin";
 import {
   addToNext,
   completeTask,
-  getToday,
+  getCalendar,
+  getHabits,
+  getTasks,
   json,
+  readCalendarConfig,
   readConfig,
-  resolveSources,
+  readHabitsConfig,
+  readTasksConfig,
+  resolveCalendar,
+  resolveTasks,
   resolveTaskWrites,
   restart,
   type Config,
-  type Sources,
 } from "./api";
 import { readJson } from "./domain/input";
-import { NotConnectedError, type TaskWriter, type TaskWrites } from "./sources/types";
+import { NotConnectedError, type TaskReader, type TaskWriter, type TaskWrites } from "./sources/types";
 
 type WriteRoute = { kind: "complete"; taskId: string } | { kind: "next" } | { kind: "restart" };
 
@@ -26,18 +31,42 @@ function matchWriteRoute(pathname: string): WriteRoute | null {
   return m ? { kind: "complete", taskId: m[1]! } : null;
 }
 
-/** The sources and settings a route needs, or the answer that says what is missing. */
-function sourcesAndConfig(env: Env): { sources: Sources; cfg: Config } | Response {
-  let sources: Sources;
+const notConnected = (e: NotConnectedError): Response => json({ error: "not_connected", provider: e.provider }, 503);
+const notConfigured = (): Response => json({ error: "not_configured" }, 503);
+
+/**
+ * One section's way in: the provider first (`not_connected`), then that section's own
+ * settings (`not_configured`), then the handler. A section never asks about another's.
+ */
+async function section<S, C>(
+  resolve: () => S,
+  readCfg: () => C | null,
+  run: (source: S, cfg: C) => Promise<Response>,
+): Promise<Response> {
+  let source: S;
   try {
-    sources = resolveSources(env);
+    source = resolve();
   } catch (e) {
-    if (e instanceof NotConnectedError) return json({ error: "not_connected", provider: e.provider }, 503);
+    if (e instanceof NotConnectedError) return notConnected(e);
+    throw e;
+  }
+  const cfg = readCfg();
+  if (!cfg) return notConfigured();
+  return run(source, cfg);
+}
+
+/** The Today reader and both project IDs, for the write routes. */
+function tasksAndConfig(env: Env): { tasks: TaskReader; cfg: Config } | Response {
+  let tasks: TaskReader;
+  try {
+    tasks = resolveTasks(env);
+  } catch (e) {
+    if (e instanceof NotConnectedError) return notConnected(e);
     throw e;
   }
   const cfg = readConfig(env, env.USE_FAKES === "true");
-  if (!cfg) return json({ error: "not_configured" }, 503);
-  return { sources, cfg };
+  if (!cfg) return notConfigured();
+  return { tasks, cfg };
 }
 
 /** True when every named write method is switched on. */
@@ -61,21 +90,21 @@ async function runWrite(write: WriteRoute, body: Record<string, unknown>, env: E
   switch (write.kind) {
     case "complete": {
       if (!has(writes, "completeTask")) return notEnabled();
-      const ready = sourcesAndConfig(env);
+      const ready = tasksAndConfig(env);
       if (ready instanceof Response) return ready;
-      return completeTask(ready.sources.tasks, writes, ready.cfg, write.taskId);
+      return completeTask(ready.tasks, writes, ready.cfg, write.taskId);
     }
     case "next": {
       if (!has(writes, "createTask")) return notEnabled();
-      const ready = sourcesAndConfig(env);
+      const ready = tasksAndConfig(env);
       if (ready instanceof Response) return ready;
       return addToNext(writes, ready.cfg, body);
     }
     case "restart": {
       if (!has(writes, "moveTask", "createTask")) return notEnabled();
-      const ready = sourcesAndConfig(env);
+      const ready = tasksAndConfig(env);
       if (ready instanceof Response) return ready;
-      return restart(ready.sources.tasks, writes, ready.cfg);
+      return restart(ready.tasks, writes, ready.cfg);
     }
     default:
       // A write route with no case above is a compile error, not a 404.
@@ -92,10 +121,29 @@ async function routeApi(
   const write = method === "POST" ? matchWriteRoute(pathname) : null;
   if (write && body) return runWrite(write, body, env);
 
-  if (method === "GET" && pathname === "/api/today") {
-    const ready = sourcesAndConfig(env);
-    if (ready instanceof Response) return ready;
-    return getToday(ready.sources, ready.cfg, new Date());
+  if (method === "GET") {
+    const fakes = env.USE_FAKES === "true";
+    const now = new Date();
+    switch (pathname) {
+      case "/api/tasks":
+        return section(
+          () => resolveTasks(env),
+          () => readTasksConfig(env, fakes),
+          (tasks, cfg) => getTasks(tasks, cfg, now, resolveTaskWrites(env)),
+        );
+      case "/api/calendar":
+        return section(
+          () => resolveCalendar(env),
+          () => readCalendarConfig(env, fakes),
+          (calendar, cfg) => getCalendar(calendar, cfg, now),
+        );
+      case "/api/habits":
+        return section(
+          () => resolveTasks(env),
+          () => readHabitsConfig(env, fakes),
+          (tasks, cfg) => getHabits(tasks, cfg, now),
+        );
+    }
   }
 
   return json({ error: "not_found" }, 404);

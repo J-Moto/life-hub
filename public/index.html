@@ -5,26 +5,42 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Life Hub</title>
 <link rel="stylesheet" href="/app.css">
-<script src="/app.js" defer></script>
+<script type="module" src="/app.js"></script>
 </head>
 <body>
 <main>
   <p class="placeholder">Placeholder page. The real design arrives after the mockup is picked.</p>
-  <section aria-labelledby="today-h">
+  <p id="signin" hidden><a href="/">Sign in again</a></p>
+  <p><button type="button" id="refresh">Refresh</button></p>
+
+  <section aria-labelledby="cal-h" id="calendar-section">
+    <h2 id="cal-h">Calendar</h2>
+    <p class="note" id="calendar-note"></p>
+    <p id="calendar-reconnect" hidden><a href="/setup">Reconnect Google</a></p>
+    <ul id="calendar"></ul>
+    <p class="updated" id="calendar-updated"></p>
+  </section>
+  <section aria-labelledby="today-h" id="tasks-section">
     <h2 id="today-h">Today</h2>
-    <ul id="today"><li>Loading…</li></ul>
+    <p class="note" id="tasks-note"></p>
+    <p id="tasks-reconnect" hidden><a href="/setup">Reconnect TickTick</a></p>
+    <ul id="today"></ul>
+    <p class="updated" id="tasks-updated"></p>
   </section>
-  <section aria-labelledby="hab-h">
+  <section aria-labelledby="hab-h" id="habits-section">
     <h2 id="hab-h">This week</h2>
+    <p class="note" id="habits-note"></p>
+    <p id="habits-reconnect" hidden><a href="/setup">Reconnect TickTick</a></p>
     <ul id="habits"></ul>
+    <p class="updated" id="habits-updated"></p>
   </section>
-  <form id="add-form">
+  <form id="add-form" hidden>
     <label for="add">Add to Next</label>
     <input id="add" name="title" maxlength="300" autocomplete="off">
     <label><input type="checkbox" id="job"> JOB</label>
     <button type="submit">Add</button>
   </form>
-  <button type="button" id="restart">Restart the day</button>
+  <button type="button" id="restart" hidden>Restart the day</button>
   <p id="status" role="status"></p>
 </main>
 </body>

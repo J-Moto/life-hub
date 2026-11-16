@@ -1,5 +1,19 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { addToNext, completeTask, getToday, restart, setDevFakes, type Config, type Sources } from "../src/api";
+import {
+  addToNext,
+  completeTask,
+  getCalendar,
+  getHabits,
+  getTasks,
+  readCalendarConfig,
+  readHabitsConfig,
+  readTasksConfig,
+  restart,
+  setDevFakes,
+  type Config,
+  type Sources,
+} from "../src/api";
+import type { Env } from "../src/env";
 import { FakeCalendarSource, FakeTaskSource } from "../src/sources/fakes";
 import type { TaskReader } from "../src/sources/types";
 import { readOnly } from "./helpers/sources";
@@ -31,27 +45,117 @@ beforeEach(() => {
   setDevFakes(null);
 });
 
-describe("GET /api/today", () => {
-  it("returns Today tasks with JOB flags and habit %", async () => {
-    const res = await getToday(sources, cfg, new Date("2026-11-11T17:00:00Z"));
+const NOON = new Date("2026-11-11T17:00:00Z"); // 12:00 in Indianapolis
+const allWrites = { completeTask: async () => {}, createTask: async () => ({}) as any, moveTask: async () => {} };
+
+describe("GET /api/tasks", () => {
+  it("returns Today's tasks with JOB flags", async () => {
+    const res = await getTasks(reads, cfg, NOON, allWrites);
     const body = (await res.json()) as any;
-    expect(body.today).toEqual([
+    expect(body.date).toBe("2026-11-11");
+    expect(body.tasks).toEqual([
       { id: "a", title: "JOB: apply to 1 role", job: true },
       { id: "b", title: "Finish video", job: false },
     ]);
-    expect(body.habits[0]).toMatchObject({ percent: 33 });
-    expect(body.problems).toEqual([]);
     expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
-  it("still answers when one source fails", async () => {
-    sources.calendar.listEvents = async () => {
-      throw new Error("down");
-    };
-    const body = (await (await getToday(sources, cfg, new Date())).json()) as any;
-    expect(body.calendar).toBeNull();
-    expect(body.problems).toEqual(["calendar"]);
-    expect(body.today).not.toBeNull();
+  it("carries no habit or calendar data", async () => {
+    const body = (await (await getTasks(reads, cfg, NOON, allWrites)).json()) as any;
+    expect(body).not.toHaveProperty("habits");
+    expect(body).not.toHaveProperty("calendar");
+    expect(body).not.toHaveProperty("problems");
+  });
+
+  it("reports which write routes are switched on", async () => {
+    const on = (await (await getTasks(reads, cfg, NOON, allWrites)).json()) as any;
+    expect(on.writes).toEqual({ complete: true, next: true, restart: true });
+
+    const none = (await (await getTasks(reads, cfg, NOON, {})).json()) as any;
+    expect(none.writes).toEqual({ complete: false, next: false, restart: false });
+
+    // Each route needs only its own methods; Restart needs both move and create.
+    const onlyComplete = (await (await getTasks(reads, cfg, NOON, { completeTask: allWrites.completeTask })).json()) as any;
+    expect(onlyComplete.writes).toEqual({ complete: true, next: false, restart: false });
+    const onlyCreate = (await (await getTasks(reads, cfg, NOON, { createTask: allWrites.createTask })).json()) as any;
+    expect(onlyCreate.writes).toEqual({ complete: false, next: true, restart: false });
+    const onlyMove = (await (await getTasks(reads, cfg, NOON, { moveTask: allWrites.moveTask })).json()) as any;
+    expect(onlyMove.writes).toEqual({ complete: false, next: false, restart: false });
+  });
+});
+
+describe("GET /api/calendar", () => {
+  const at = (h: number) => `2026-11-11T${String(h).padStart(2, "0")}:00:00-05:00`;
+
+  it("returns the current day's events in time order", async () => {
+    const calendar = new FakeCalendarSource([
+      { id: "e2", title: "Later", start: at(15), end: at(16), allDay: false },
+      { id: "e1", title: "Work Block", start: at(10), end: at(12), allDay: false },
+      { id: "far", title: "Tomorrow", start: "2026-11-12T10:00:00-05:00", end: "2026-11-12T11:00:00-05:00", allDay: false },
+    ]);
+    const res = await getCalendar(calendar, cfg, NOON);
+    const body = (await res.json()) as any;
+    expect(body.date).toBe("2026-11-11");
+    expect(body.events.map((e: any) => e.id)).toEqual(["e1", "e2"]);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("answers an empty list for an empty day", async () => {
+    const body = (await (await getCalendar(new FakeCalendarSource([]), cfg, NOON)).json()) as any;
+    expect(body.events).toEqual([]);
+  });
+
+  it("carries no task or habit data", async () => {
+    const body = (await (await getCalendar(new FakeCalendarSource([]), cfg, NOON)).json()) as any;
+    expect(body).not.toHaveProperty("tasks");
+    expect(body).not.toHaveProperty("habits");
+  });
+});
+
+describe("GET /api/habits", () => {
+  it("returns the weekly percentages", async () => {
+    const res = await getHabits(reads, cfg, NOON);
+    const body = (await res.json()) as any;
+    expect(body.date).toBe("2026-11-11");
+    expect(body.habits[0]).toMatchObject({ percent: 33 });
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("carries no task or calendar data", async () => {
+    const body = (await (await getHabits(reads, cfg, NOON)).json()) as any;
+    expect(body).not.toHaveProperty("tasks");
+    expect(body).not.toHaveProperty("events");
+  });
+});
+
+describe("settings per section", () => {
+  const env = (vars: Record<string, string>) => ({ TIME_ZONE: "America/Indiana/Indianapolis", ...vars }) as unknown as Env;
+
+  it("tasks need only the Today project ID", () => {
+    expect(readTasksConfig(env({}), false)).toBeNull();
+    expect(readTasksConfig(env({ TICKTICK_NEXT_PROJECT_ID: "n" }), false)).toBeNull();
+    expect(readTasksConfig(env({ TICKTICK_TODAY_PROJECT_ID: "t" }), false)).toMatchObject({ todayProjectId: "t" });
+  });
+
+  it("an empty Today project ID is not configured, with or without fake data", () => {
+    expect(readTasksConfig(env({ TICKTICK_TODAY_PROJECT_ID: "" }), false)).toBeNull();
+    expect(readTasksConfig(env({ TICKTICK_TODAY_PROJECT_ID: "" }), true)).toBeNull();
+  });
+
+  it("habits need habit IDs and nothing about projects", () => {
+    expect(readHabitsConfig(env({}), false)).toBeNull();
+    expect(readHabitsConfig(env({ TICKTICK_HABIT_IDS: " , " }), false)).toBeNull();
+    expect(readHabitsConfig(env({ TICKTICK_HABIT_IDS: "h1, h2" }), false)).toMatchObject({ habitIds: ["h1", "h2"] });
+  });
+
+  it("the calendar needs no TickTick setting", () => {
+    expect(readCalendarConfig(env({}), false)).toMatchObject({ timeZone: "America/Indiana/Indianapolis" });
+  });
+
+  it("with fake data on, every section has what it needs without any setting", () => {
+    expect(readTasksConfig(env({}), true)).toMatchObject({ todayProjectId: "today" });
+    expect(readHabitsConfig(env({}), true)).toMatchObject({ habitIds: ["h-job", "h-phone", "h-home"] });
+    expect(readCalendarConfig(env({}), true)).not.toBeNull();
   });
 });
 

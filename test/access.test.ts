@@ -40,7 +40,7 @@ async function token(opts: { email?: string; aud?: string; iss?: string; exp?: s
 function req(jwt?: string, host = "hub.example.com") {
   const headers = new Headers();
   if (jwt) headers.set("Cf-Access-Jwt-Assertion", jwt);
-  return new Request(`https://${host}/api/today`, { headers });
+  return new Request(`https://${host}/api/tasks`, { headers });
 }
 
 describe("verifyAccess", () => {
@@ -113,7 +113,7 @@ describe("verifyAccess", () => {
     const local = (ip: string | null, host = "localhost:8787") => {
       const headers = new Headers();
       if (ip) headers.set("CF-Connecting-IP", ip);
-      return new Request(`http://${host}/api/today`, { headers });
+      return new Request(`http://${host}/api/tasks`, { headers });
     };
 
     it("works for a loopback client on localhost", async () => {
