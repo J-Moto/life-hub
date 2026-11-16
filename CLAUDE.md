@@ -7,7 +7,7 @@ Read `docs/design/v1.md` (the plan) and `DESIGN.md` (look and feel) before build
 
 ## Stack
 - One Cloudflare Worker: static assets (the page) and `/api/*` routes. No cron in v1. TypeScript.
-- Reads TickTick Open API and Google Calendar via OAuth2. Stores none of their data. Only exception: OAuth tokens, encrypted (AES-GCM, key in a Worker secret) in KV.
+- Reads TickTick Open API and Google Calendar via OAuth2. Stores none of their data. Only exception: OAuth tokens, encrypted (AES-GCM, key in a Worker secret) in KV. KV also holds a 10-minute login state (provider, PKCE verifier, hash of the Access email; `docs/design/v1.md` G6b).
 - Protected by Cloudflare Access. The Worker also validates the `Cf-Access-Jwt-Assertion` header itself.
 - Tests: Vitest with the Cloudflare Workers test pool.
 
@@ -30,7 +30,7 @@ Read `docs/design/v1.md` (the plan) and `DESIGN.md` (look and feel) before build
 
 ## Security rules
 - Never read, print, log or commit tokens, keys, auth headers, `.env*` or `.dev.vars`.
-- Every route that changes data is POST-only and checks the Access JWT plus same origin.
+- Every route that changes data is POST-only and checks the Access JWT plus same origin. Two exceptions (`docs/design/v1.md` F5): the OAuth callback, a GET from the provider's redirect, guarded by `state`, cookie and Access email instead (G6b); and token refresh inside read routes, which writes or deletes only that provider's token record (G5).
 - Smallest OAuth scopes that work: TickTick `tasks:read tasks:write`, Google `calendar.events.readonly`.
 - OAuth flows use `state` and PKCE.
 - Log status codes and timings only, never full API responses.
