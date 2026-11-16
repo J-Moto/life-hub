@@ -10,8 +10,15 @@ Nothing in this file is part of v1. Decision IDs such as A4 or D1 refer to `v1.m
 - **Domain move:** once josephmoto.com is in the Cloudflare account, serve the hub at `hub.josephmoto.com`. That changes the Access application's host and both OAuth redirect URIs, so each provider needs the new callback address registered.
 - **v1.1:** a "Hub" Google calendar the Worker writes to (top Today task, "Hub needs attention"), so the Akimart shows it. Needs a second, narrow write scope. A scheduled health check of the TickTick and Google tokens can come back with it; v1 has no cron because nothing would read the result (H2).
 - **v1.2:** the weekly security scout (scheduled task) once the repo is live.
+- **v1.2, next to the scout:** a guard agent that watches the other agents for risky actions taken without approval.
 - **Later, one at a time, each after a month of daily use:** edit task text on the hub, links to my Claude projects, scrap pad, flowchart map, project planner, smart devices, n8n on a home server, finances last.
+- **Flowchart map, in more detail:** interactive charts at several zoom levels showing how the hub is built, how data flows, and its security layers. Maybe several charts, maybe searchable. The main use is finding where something broke. Same zoom-level idea as "progress at four zoom levels" (section 2). It must never reveal addresses, IDs or secrets.
 - **Later still:** a built-in chat panel using the Claude API. It needs its own design pass first: a new secret (the API key) and a decision on what hub data, if any, the chat can see.
+- **Chat panel, in more detail:** one place to talk and brain-dump. It turns that into objectives or tasks, can start doing or automating things, and points to resources. It picks the model itself (Opus for hard questions, Sonnet for routine). Later it also covers job objectives and work projects. For now this lives in a Claude project. Acting on tasks needs the same per-action write gate and review as the v1 write routes.
+- **Cloudflare Worker Previews:** per-branch test environments (`npx wrangler preview`). Undecided whether useful. Conflicts with v1's "preview_urls stay off"; reopen only with a reason.
+- **A team of model agents for building:** Claude Code subagents in `.claude/agents/`, each with its own model (reviewer, builder, docs, tiny lookups). Watch token cost. They must still stop for the owner's OK on edits outside the task, installs, deploys, secrets and merges. Possible first try after v1: one docs subagent.
+- **Build while away:** long jobs keep running. Decisions are parked in a questions list for the owner, and work continues on other items.
+- **Approvals and progress updates on the phone:** the same security rules apply to anything approved there.
 - **Later, possibly:** a phone app that reuses the same `/api/*` routes.
 - **Later, possibly:** Bitwarden for passkeys and, if a home server is built, possibly Bitwarden Secrets Manager.
 - **Later still:** the smart layer (section 2).

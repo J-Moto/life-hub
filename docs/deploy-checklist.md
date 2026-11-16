@@ -36,3 +36,4 @@ One row per deploy.
 | Date | Step deployed | Checks run | Result | Notes |
 |---|---|---|---|---|
 | | | | | |
+| 2026-11-16 | 1a | 1–7 | All passed | Fail-closed order; Access enabled from the Worker's Access tab; GitHub only (instant auth) |

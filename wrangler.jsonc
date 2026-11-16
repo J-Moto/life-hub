@@ -22,7 +22,7 @@
     // Every request hits the Worker first, so the Access check covers the page too.
     "run_worker_first": true
   },
-  "kv_namespaces": [{ "binding": "TOKENS" }],
+  "kv_namespaces": [{ "binding": "TOKENS", "id": "9c92425f454840579e72114ff1d11a02" }],
   // No cron. The list is empty on purpose: Cloudflare removes a deployed trigger only when
   // "crons" is an empty list, not when the key is deleted.
   "triggers": { "crons": [] },
