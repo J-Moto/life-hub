@@ -77,9 +77,13 @@ describe("isSameOrigin", () => {
   it("rejects a cross-site Origin", () => {
     expect(isSameOrigin(new Request(url, { method: "POST", headers: { Origin: "https://evil.com" } }))).toBe(false);
   });
-  it("falls back to Sec-Fetch-Site", () => {
-    expect(isSameOrigin(new Request(url, { method: "POST", headers: { "Sec-Fetch-Site": "same-origin" } }))).toBe(true);
+  it("rejects a missing Origin even when Sec-Fetch-Site says same-origin", () => {
+    expect(isSameOrigin(new Request(url, { method: "POST", headers: { "Sec-Fetch-Site": "same-origin" } }))).toBe(false);
     expect(isSameOrigin(new Request(url, { method: "POST", headers: { "Sec-Fetch-Site": "cross-site" } }))).toBe(false);
+  });
+  it("rejects an Origin with a different scheme or port", () => {
+    expect(isSameOrigin(new Request(url, { method: "POST", headers: { Origin: "http://hub.example.com" } }))).toBe(false);
+    expect(isSameOrigin(new Request(url, { method: "POST", headers: { Origin: "https://hub.example.com:8443" } }))).toBe(false);
   });
   it("rejects when neither header is present", () => {
     expect(isSameOrigin(new Request(url, { method: "POST" }))).toBe(false);

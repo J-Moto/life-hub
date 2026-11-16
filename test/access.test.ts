@@ -89,6 +89,20 @@ describe("verifyAccess", () => {
     expect(await verifyAccess(req(await token()), env, keys)).toMatchObject({ ok: false, status: 500 });
   });
 
+  it("fails closed when the team domain or the email is missing", async () => {
+    // A valid token must not help: with either setting unset or blank, nobody gets in.
+    const jwt = await token();
+    const broken = [
+      { ...baseEnv, ACCESS_TEAM_DOMAIN: undefined },
+      { ...baseEnv, ACCESS_TEAM_DOMAIN: "" },
+      { ...baseEnv, ALLOWED_EMAIL: undefined },
+      { ...baseEnv, ALLOWED_EMAIL: "  " },
+    ];
+    for (const env of broken) {
+      expect(await verifyAccess(req(jwt), env as Env, keys)).toMatchObject({ ok: false, status: 500 });
+    }
+  });
+
   it("fails closed on a malformed team domain", async () => {
     const env = { ...baseEnv, ACCESS_TEAM_DOMAIN: "evil.com/x" } as Env;
     expect(await verifyAccess(req(await token()), env, keys)).toMatchObject({ ok: false, status: 500 });

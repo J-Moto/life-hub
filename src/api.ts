@@ -1,11 +1,18 @@
 import type { Env } from "./env";
 import { addDays, localDay, mondayStamp, weeklyPercents } from "./domain/week";
-import { cleanTitle, readJson, validTaskId, withJobPrefix } from "./domain/input";
-import { NotConnectedError, type CalendarSource, type TaskSource } from "./sources/types";
+import { cleanTitle, validTaskId, withJobPrefix } from "./domain/input";
+import {
+  NotConnectedError,
+  type CalendarSource,
+  type TaskReader,
+  type TaskWriter,
+  type TaskWrites,
+} from "./sources/types";
 import { sampleFakes } from "./sources/fakes";
 
+/** What the read routes use. The write part is separate: see `resolveTaskWrites`. */
 export interface Sources {
-  tasks: TaskSource;
+  tasks: TaskReader;
   calendar: CalendarSource;
 }
 
@@ -36,20 +43,36 @@ export function readConfig(env: Env, usingFakes: boolean): Config | null {
   };
 }
 
-let devFakes: Sources | null = null;
+let devFakes: { sources: Sources; writes: TaskWrites } | null = null;
+
+function fakes(): { sources: Sources; writes: TaskWrites } {
+  if (!devFakes) {
+    const { tasks, calendar } = sampleFakes();
+    devFakes = { sources: { tasks, calendar }, writes: tasks };
+  }
+  return devFakes;
+}
 
 /** Real clients arrive with the OAuth features; until then only fakes exist. */
 export function resolveSources(env: Env): Sources {
-  if (env.USE_FAKES === "true") {
-    devFakes ??= sampleFakes();
-    return devFakes;
-  }
+  if (env.USE_FAKES === "true") return fakes().sources;
   throw new NotConnectedError("ticktick");
 }
 
-/** For tests: replace the dev fakes. */
-export function setDevFakes(s: Sources | null): void {
-  devFakes = s;
+/**
+ * The write methods that are switched on. This is the only place that decides it.
+ * Fake data has all of them. The real TickTick client has none: steps 5, 6 and 8 add
+ * one each, after that route's own security review.
+ * Never throws, so the write gate can be checked before any provider is looked at.
+ */
+export function resolveTaskWrites(env: Env): TaskWrites {
+  if (env.USE_FAKES === "true") return fakes().writes;
+  return {};
+}
+
+/** For tests: replace the dev fakes. With no `writes`, no write method is switched on. */
+export function setDevFakes(sources: Sources | null, writes: TaskWrites = {}): void {
+  devFakes = sources ? { sources, writes } : null;
 }
 
 export function json(body: unknown, status = 200): Response {
@@ -111,21 +134,29 @@ export async function getToday(sources: Sources, cfg: Config, now: Date): Promis
   });
 }
 
-export async function completeTask(sources: Sources, cfg: Config, taskId: string): Promise<Response> {
+export async function completeTask(
+  tasks: TaskReader,
+  writer: Pick<TaskWriter, "completeTask">,
+  cfg: Config,
+  taskId: string,
+): Promise<Response> {
   if (!validTaskId(taskId)) return json({ error: "bad_task_id" }, 400);
   // Only tasks currently in Today can be completed from the dashboard.
-  const open = await sources.tasks.listOpenTasks(cfg.todayProjectId);
+  const open = await tasks.listOpenTasks(cfg.todayProjectId);
   if (!open.some((t) => t.id === taskId)) return json({ error: "not_in_today" }, 404);
-  await sources.tasks.completeTask(cfg.todayProjectId, taskId);
+  await writer.completeTask(cfg.todayProjectId, taskId);
   return json({ ok: true });
 }
 
-export async function addToNext(sources: Sources, cfg: Config, request: Request): Promise<Response> {
-  const body = await readJson(request);
-  if (!body) return json({ error: "bad_body" }, 400);
+/** `body` is the request's JSON object, already read and checked by the router. */
+export async function addToNext(
+  writer: Pick<TaskWriter, "createTask">,
+  cfg: Config,
+  body: Record<string, unknown>,
+): Promise<Response> {
   const title = cleanTitle(body.title);
   if (!title) return json({ error: "bad_title" }, 400);
-  const task = await sources.tasks.createTask(cfg.nextProjectId, withJobPrefix(title, body.job));
+  const task = await writer.createTask(cfg.nextProjectId, withJobPrefix(title, body.job));
   return json({ ok: true, id: task.id }, 201);
 }
 
@@ -133,8 +164,12 @@ export async function addToNext(sources: Sources, cfg: Config, request: Request)
  * Moves Today's leftovers to Next and adds one Minimum task. Safe to repeat: a second
  * tap (or a retry) leaves an already-fresh Today alone. Never deletes anything.
  */
-export async function restart(sources: Sources, cfg: Config): Promise<Response> {
-  const open = await sources.tasks.listOpenTasks(cfg.todayProjectId);
+export async function restart(
+  tasks: TaskReader,
+  writer: Pick<TaskWriter, "moveTask" | "createTask">,
+  cfg: Config,
+): Promise<Response> {
+  const open = await tasks.listOpenTasks(cfg.todayProjectId);
   const leftovers = open.filter((t) => t.title !== cfg.minimumTask);
   const hasMinimum = open.some((t) => t.title === cfg.minimumTask);
 
@@ -142,13 +177,13 @@ export async function restart(sources: Sources, cfg: Config): Promise<Response> 
   let failed = 0;
   for (const t of leftovers) {
     try {
-      await sources.tasks.moveTask(t.id, cfg.todayProjectId, cfg.nextProjectId);
+      await writer.moveTask(t.id, cfg.todayProjectId, cfg.nextProjectId);
       moved++;
     } catch {
       failed++;
     }
   }
-  if (!hasMinimum) await sources.tasks.createTask(cfg.todayProjectId, cfg.minimumTask);
+  if (!hasMinimum) await writer.createTask(cfg.todayProjectId, cfg.minimumTask);
 
   if (failed > 0) {
     return json({ ok: false, moved, failed, message: `Moved ${moved}, ${failed} didn't move. Try again.` }, 502);

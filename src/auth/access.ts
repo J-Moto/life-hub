@@ -1,9 +1,37 @@
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 import type { Env } from "../env";
 
-export type AccessResult =
-  | { ok: true; email: string; devBypass: boolean }
-  | { ok: false; status: 401 | 403 | 500; reason: string };
+// Exists only in the type system, and only this file can name it.
+declare const proof: unique symbol;
+
+/**
+ * A passed Access check. Only `verifyAccess` makes one. The type carries a mark no other
+ * file can write, so a hand-built object doesn't compile. At run time `isVerifiedAccess`
+ * accepts only the very objects `verifyAccess` returned: the right shape, or a copy of a
+ * real result, is not one.
+ */
+export type VerifiedAccess = {
+  readonly ok: true;
+  readonly email: string;
+  readonly devBypass: boolean;
+  readonly [proof]: true;
+};
+
+export type AccessResult = VerifiedAccess | { ok: false; status: 401 | 403 | 500; reason: string };
+
+// Every result `verifyAccess` has passed. Private to this file, so nothing else can add to it.
+const passed = new WeakSet<object>();
+
+function pass(email: string, devBypass: boolean): VerifiedAccess {
+  const result = { ok: true, email, devBypass } as VerifiedAccess;
+  passed.add(result);
+  return result;
+}
+
+/** True only for a result that `verifyAccess` itself returned as passed. */
+export function isVerifiedAccess(value: unknown): value is VerifiedAccess {
+  return typeof value === "object" && value !== null && passed.has(value);
+}
 
 // One JWKS fetcher per team domain, reused across requests in the same isolate.
 const jwksCache = new Map<string, JWTVerifyGetKey>();
@@ -48,7 +76,7 @@ export async function verifyAccess(
 ): Promise<AccessResult> {
   if (devBypassAllowed(request, env)) {
     console.warn("DEV ACCESS BYPASS ACTIVE (local only)");
-    return { ok: true, email: "dev@localhost", devBypass: true };
+    return pass("dev@localhost", true);
   }
 
   const team = env.ACCESS_TEAM_DOMAIN;
@@ -70,7 +98,7 @@ export async function verifyAccess(
     });
     const email = typeof payload.email === "string" ? payload.email.toLowerCase() : "";
     if (email !== allowed) return { ok: false, status: 403, reason: "email_not_allowed" };
-    return { ok: true, email, devBypass: false };
+    return pass(email, false);
   } catch {
     return { ok: false, status: 401, reason: "invalid_token" };
   }

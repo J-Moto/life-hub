@@ -1,13 +1,20 @@
-// Life Hub Worker config. Committed to a PUBLIC repo: no secrets and no personal IDs here.
-// Secrets (set with `npx wrangler secret put NAME`): TOKEN_ENC_KEY, ACCESS_AUD, ALLOWED_EMAIL,
-//   TICKTICK_CLIENT_ID, TICKTICK_CLIENT_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET.
+// Life Hub Worker config. Committed to a PUBLIC repo: no secrets and no personal values here.
+// Committed here: only TIME_ZONE and USE_FAKES.
+// Set on Cloudflare as Worker vars or secrets, never in this file (forms: docs/design/v1.md, section 3):
+//   Access:   ACCESS_TEAM_DOMAIN, ACCESS_AUD, ALLOWED_EMAIL. If any is missing, the Worker rejects every request.
+//   Secrets:  TOKEN_ENC_KEY, TICKTICK_CLIENT_ID, TICKTICK_CLIENT_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET.
+//   Personal: HUB_ORIGIN, TICKTICK_TODAY_PROJECT_ID, TICKTICK_NEXT_PROJECT_ID, MINIMUM_TASK_TEXT,
+//             HABITS, CALENDAR_IDS, WORK_BLOCK_TITLE.
+// No cron in v1 (see "triggers" below).
 // Local dev values go in .dev.vars (gitignored, and Claude is blocked from reading it).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "life-hub",
   "main": "src/index.ts",
   "compatibility_date": "2026-11-01",
-  "workers_dev": false,
+  // The workers.dev address is the hub's address, behind Cloudflare Access (v1.md F1, F2).
+  "workers_dev": true,
+  // Must be set explicitly: turning workers.dev off or on does not switch preview addresses off.
   "preview_urls": false,
   "assets": {
     "directory": "./public",
@@ -16,13 +23,14 @@
     "run_worker_first": true
   },
   "kv_namespaces": [{ "binding": "TOKENS" }],
-  "triggers": { "crons": ["7 * * * *"] },
+  // No cron. The list is empty on purpose: Cloudflare removes a deployed trigger only when
+  // "crons" is an empty list, not when the key is deleted.
+  "triggers": { "crons": [] },
   "vars": {
     "TIME_ZONE": "America/Indiana/Indianapolis",
-    "ACCESS_TEAM_DOMAIN": "",
     "USE_FAKES": "false"
   },
-  // Keep vars set in the Cloudflare dashboard (personal IDs) instead of wiping them on each deploy.
+  // Keep vars set in the Cloudflare dashboard (Access settings, personal IDs) instead of wiping them on each deploy.
   "keep_vars": true,
   "observability": { "enabled": true }
 }

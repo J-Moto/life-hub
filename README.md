@@ -6,7 +6,7 @@ Built as a portfolio project to practice secure OAuth integrations, edge deploym
 
 ## How it works
 
-- **One Cloudflare Worker** serves the page, the API and an hourly health check.
+- **One Cloudflare Worker** serves the page and the API. No scheduled jobs.
 - **Reads, never stores.** TickTick and Google Calendar stay the source of truth. The only stored data is encrypted OAuth tokens.
 - **Locked down.** Cloudflare Access in front, plus JWT validation inside the Worker. POST-only for anything that changes data.
 

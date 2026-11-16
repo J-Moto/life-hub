@@ -1,4 +1,4 @@
-/** What the dashboard needs from TickTick and Google. Real clients and fakes both implement these. */
+/** What the dashboard needs from TickTick and Google. Real clients and fakes implement these. */
 
 export interface Task {
   id: string;
@@ -28,14 +28,29 @@ export interface CalendarEvent {
   allDay: boolean;
 }
 
-export interface TaskSource {
+/** The read part of TickTick. Nothing here changes the account. */
+export interface TaskReader {
   listOpenTasks(projectId: string): Promise<Task[]>;
-  completeTask(projectId: string, taskId: string): Promise<void>;
-  createTask(projectId: string, title: string): Promise<Task>;
-  moveTask(taskId: string, fromProjectId: string, toProjectId: string): Promise<void>;
+  /** Stays in the read part until step 7 takes habit names from config. */
   listHabits(habitIds: string[]): Promise<Habit[]>;
   listCheckins(habitIds: string[], fromStamp: string, toStamp: string): Promise<HabitCheckin[]>;
 }
+
+/**
+ * The write part of TickTick. A source that doesn't have it can't change the account:
+ * its write routes answer `not_enabled`.
+ */
+export interface TaskWriter {
+  completeTask(projectId: string, taskId: string): Promise<void>;
+  createTask(projectId: string, title: string): Promise<Task>;
+  moveTask(taskId: string, fromProjectId: string, toProjectId: string): Promise<void>;
+}
+
+/**
+ * The write methods that are switched on. Each write route runs only when the methods it
+ * needs are here, so one route can be switched on without the others.
+ */
+export type TaskWrites = Partial<TaskWriter>;
 
 export interface CalendarSource {
   /** Events overlapping the local day [startIso, endIso). */
