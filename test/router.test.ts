@@ -1,9 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { routeRequest, type VerifiedAccess } from "../src/router";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { routeRequest } from "../src/router";
+import type { VerifiedAccess } from "../src/auth/access";
 import { setDevFakes, type Sources } from "../src/api";
 import { FakeCalendarSource, FakeTaskSource } from "../src/sources/fakes";
 import type { Task } from "../src/sources/types";
 import type { Env } from "../src/env";
+import { ownerAccess } from "./helpers/access";
 import { readOnly } from "./helpers/sources";
 
 // The routing that runs after the Access check, called directly. The Access check itself
@@ -12,8 +14,12 @@ import { readOnly } from "./helpers/sources";
 const HUB = "https://hub.example.com";
 const MINIMUM = "JOB: save 1 posting";
 
-/** What src/index.ts hands over once the Access token has been verified. */
-const OWNER: VerifiedAccess = { ok: true, email: "me@example.com", devBypass: false };
+/** What src/index.ts hands over once the Access token has been verified. Made by `verifyAccess`. */
+let OWNER: VerifiedAccess;
+
+beforeAll(async () => {
+  OWNER = await ownerAccess();
+});
 
 const fakesOn = {
   TIME_ZONE: "America/Indiana/Indianapolis",
@@ -60,17 +66,35 @@ function expectNothingWritten(): void {
 }
 
 describe("Access", () => {
+  /** Every write route and a read route answer 401 to this caller. */
+  async function expectRefused(access: unknown): Promise<void> {
+    const forged = access as VerifiedAccess;
+    for (const { path, body } of WRITE_ROUTES) {
+      const request = new Request(`${HUB}${path}`, { method: "POST", headers: JSON_FROM_HUB, body });
+      expect((await routeRequest(request, fakesOn, forged)).status).toBe(401);
+    }
+    expect((await routeRequest(new Request(`${HUB}/api/today`), fakesOn, forged)).status).toBe(401);
+  }
+
   it("refuses a caller that has no verified Access result", async () => {
     const notVerified = [undefined, null, { ok: false, status: 401, reason: "missing_token" }, { email: "me@example.com" }];
-    for (const access of notVerified) {
-      const forged = access as unknown as VerifiedAccess;
-      for (const { path, body } of WRITE_ROUTES) {
-        const request = new Request(`${HUB}${path}`, { method: "POST", headers: JSON_FROM_HUB, body });
-        expect((await routeRequest(request, fakesOn, forged)).status).toBe(401);
-      }
-      expect((await routeRequest(new Request(`${HUB}/api/today`), fakesOn, forged)).status).toBe(401);
-    }
+    for (const access of notVerified) await expectRefused(access);
     expectNothingWritten();
+  });
+
+  it("refuses an Access result that verifyAccess did not produce", async () => {
+    // The type refuses a hand-built result: only src/auth/access.ts can make a VerifiedAccess.
+    // @ts-expect-error a plain object of the right shape is not a VerifiedAccess
+    const handBuilt: VerifiedAccess = { ok: true, email: "me@example.com", devBypass: false };
+    // At run time too: the right shape is not enough, and neither is a copy of a real one.
+    await expectRefused(handBuilt);
+    await expectRefused({ ...OWNER });
+    expectNothingWritten();
+  });
+
+  it("serves the caller whose Access result verifyAccess produced", async () => {
+    const res = await routeRequest(new Request(`${HUB}/api/today`), fakesOn, OWNER);
+    expect(res.status).toBe(200);
   });
 });
 
@@ -182,6 +206,35 @@ describe("POST checks", () => {
     const notUtf8 = new Uint8Array([...text.encode('{"title":"abc'), 0xff, 0xfe, ...text.encode('"}')]);
     for (const { path } of WRITE_ROUTES) {
       const res = await post(fakesOn, path, JSON_FROM_HUB, notUtf8);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "bad_body" });
+    }
+    expectNothingWritten();
+  });
+
+  it("refuses a body that starts with a byte order mark", async () => {
+    // <0xEF><0xBB><0xBF>{"title":"New thing"}: JSON every route would accept, behind a UTF-8 BOM.
+    const withBom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode('{"title":"New thing"}')]);
+    for (const { path } of WRITE_ROUTES) {
+      const res = await post(fakesOn, path, JSON_FROM_HUB, withBom);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "bad_body" });
+    }
+    expectNothingWritten();
+  });
+
+  it("refuses a body that breaks off while it is being read", async () => {
+    for (const { path } of WRITE_ROUTES) {
+      // The first chunk arrives, then the connection drops.
+      let sent = false;
+      const dropped = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent) controller.error(new Error("connection lost"));
+          else controller.enqueue(new TextEncoder().encode('{"title":'));
+          sent = true;
+        },
+      });
+      const res = await post(fakesOn, path, JSON_FROM_HUB, dropped);
       expect(res.status).toBe(400);
       expect(await res.json()).toMatchObject({ error: "bad_body" });
     }
