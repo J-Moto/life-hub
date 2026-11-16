@@ -35,7 +35,7 @@ Read `docs/design/v1.md` (the plan) and `DESIGN.md` (look and feel) before build
 - OAuth flows use `state` and PKCE.
 - Log status codes and timings only, never full API responses.
 - New dependency = one-line reason in the PR. Prefer none.
-- Only `TIME_ZONE` and `USE_FAKES` go in `wrangler.jsonc`. Everything personal (allowed email, TickTick list IDs, calendar IDs, habit names) is set as Worker vars or secrets on Cloudflare, never in the repo (it's public).
+- In `wrangler.jsonc`, vars: only `TIME_ZONE` and `USE_FAKES`; the KV namespace ID may be committed (not a secret). Everything personal (allowed email, TickTick list IDs, calendar IDs, habit names) is set as Worker vars or secrets on Cloudflare, never in the repo (it's public).
 
 ## Workflow
 - One feature per branch (`feat/<name>`), small commits, test first (TDD skill).

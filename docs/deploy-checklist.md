@@ -13,7 +13,7 @@ The deployed hub must never be reachable without Access (F1). Use one of these t
 - **Access first.** Create the Access application for the workers.dev address, set `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `ALLOWED_EMAIL` and `TOKEN_ENC_KEY` on the Worker, then deploy.
 - **Fail-closed order,** if Cloudflare needs the address to exist before Access can be attached. Deploy with the Access settings unset, check that the Worker refuses everything (check 1 below), attach Access, and only then enter the settings.
 
-At the first deploy Wrangler may create the KV namespace and write its ID into `wrangler.jsonc`. The ID is not a secret, but the file is committed to a public repo. Decide whether to commit it before committing anything after the deploy.
+At the first deploy Wrangler may create the KV namespace and write its ID into `wrangler.jsonc`. The ID is not a secret and may be committed (`CLAUDE.md`, security rules). Nothing else that the deploy writes into that file may be.
 
 ## Step 1a. Foundation
 
