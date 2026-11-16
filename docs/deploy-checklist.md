@@ -37,3 +37,4 @@ One row per deploy.
 |---|---|---|---|---|
 | | | | | |
 | 2026-11-16 | 1a | 1–7 | All passed | Fail-closed order; Access enabled from the Worker's Access tab; GitHub only (instant auth) |
+| 2026-11-16 | 1b | Checks passed; ended-session check done | All passed | Revoked the session and confirmed a background request gets a 302 to the Access sign-in page; the page shows "Sign in again" |

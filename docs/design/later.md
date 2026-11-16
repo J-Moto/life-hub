@@ -11,6 +11,7 @@ Nothing in this file is part of v1. Decision IDs such as A4 or D1 refer to `v1.m
 - **v1.1:** a "Hub" Google calendar the Worker writes to (top Today task, "Hub needs attention"), so the Akimart shows it. Needs a second, narrow write scope. A scheduled health check of the TickTick and Google tokens can come back with it; v1 has no cron because nothing would read the result (H2).
 - **v1.2:** the weekly security scout (scheduled task) once the repo is live.
 - **v1.2, next to the scout:** a guard agent that watches the other agents for risky actions taken without approval.
+- **Coach agent:** the coach sees what Claude Code does and answers routine approvals itself, asking the owner only for real decisions. Conflicts with manual approval today; decide which prompts it may answer first.
 - **Later, one at a time, each after a month of daily use:** edit task text on the hub, links to my Claude projects, scrap pad, flowchart map, project planner, smart devices, n8n on a home server, finances last.
 - **Flowchart map, in more detail:** interactive charts at several zoom levels showing how the hub is built, how data flows, and its security layers. Maybe several charts, maybe searchable. The main use is finding where something broke. Same zoom-level idea as "progress at four zoom levels" (section 2). It must never reveal addresses, IDs or secrets.
 - **Later still:** a built-in chat panel using the Claude API. It needs its own design pass first: a new secret (the API key) and a decision on what hub data, if any, the chat can see.
