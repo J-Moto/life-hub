@@ -1,7 +1,7 @@
-import type { CalendarEvent, CalendarSource, Habit, HabitCheckin, Task, TaskSource } from "./types";
+import type { CalendarEvent, CalendarSource, Habit, HabitCheckin, Task, TaskReader, TaskWriter } from "./types";
 
-/** In-memory TickTick stand-in for tests and local dev. Never used in production. */
-export class FakeTaskSource implements TaskSource {
+/** In-memory TickTick stand-in for tests and local dev, with both the read and the write part. Never used in production. */
+export class FakeTaskSource implements TaskReader, TaskWriter {
   tasks: Task[];
   habits: Habit[];
   checkins: HabitCheckin[];

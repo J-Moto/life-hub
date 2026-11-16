@@ -1,11 +1,8 @@
 /**
  * Blocks cross-site requests to routes that change data (CSRF defense on top of Access).
- * A request passes only if the browser says it came from this same site.
+ * A request passes only when its `Origin` header is exactly the request's own origin
+ * (scheme, host and port). A missing `Origin` is rejected; no other header stands in for it.
  */
 export function isSameOrigin(request: Request): boolean {
-  const url = new URL(request.url);
-  const origin = request.headers.get("Origin");
-  if (origin !== null) return origin === url.origin;
-  const site = request.headers.get("Sec-Fetch-Site");
-  return site === "same-origin";
+  return request.headers.get("Origin") === new URL(request.url).origin;
 }

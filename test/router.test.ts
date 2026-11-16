@@ -110,6 +110,38 @@ describe("POST checks", () => {
     }
     expectNothingWritten();
   });
+
+  it("refuses a POST body over 4096 bytes", async () => {
+    // A JSON object every route would otherwise accept, padded to one byte over the limit.
+    const head = '{"title":"New thing","pad":"';
+    const tail = '"}';
+    const tooBig = head + "x".repeat(4097 - head.length - tail.length) + tail;
+    expect(new TextEncoder().encode(tooBig).length).toBe(4097);
+
+    for (const { path } of WRITE_ROUTES) {
+      const res = await post(fakesOn, path, JSON_FROM_HUB, tooBig);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "bad_body" });
+    }
+    expectNothingWritten();
+  });
+
+  it("refuses a POST body under 4096 characters but over 4096 bytes", async () => {
+    // "é" is one character and two bytes in UTF-8.
+    const tooBig = `{"title":"New thing","pad":"${"é".repeat(2500)}"}`;
+    expect(tooBig.length).toBe(2530);
+    expect(new TextEncoder().encode(tooBig).length).toBe(5030);
+
+    for (const { path } of WRITE_ROUTES) {
+      const request = new Request(`${HUB}${path}`, { method: "POST", headers: JSON_FROM_HUB, body: tooBig });
+      // No declared length to go by: the body itself has to be measured.
+      expect(request.headers.get("Content-Length")).toBeNull();
+      const res = await routeRequest(request, fakesOn);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "bad_body" });
+    }
+    expectNothingWritten();
+  });
 });
 
 describe("write gate", () => {
