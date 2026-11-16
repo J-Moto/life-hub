@@ -46,6 +46,12 @@ export interface TaskWriter {
   moveTask(taskId: string, fromProjectId: string, toProjectId: string): Promise<void>;
 }
 
+/**
+ * The write methods that are switched on. Each write route runs only when the methods it
+ * needs are here, so one route can be switched on without the others.
+ */
+export type TaskWrites = Partial<TaskWriter>;
+
 export interface CalendarSource {
   /** Events overlapping the local day [startIso, endIso). */
   listEvents(startIso: string, endIso: string): Promise<CalendarEvent[]>;

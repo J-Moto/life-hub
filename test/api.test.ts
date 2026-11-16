@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { addToNext, completeTask, getToday, restart, setDevFakes, type Config, type Sources } from "../src/api";
 import { FakeCalendarSource, FakeTaskSource } from "../src/sources/fakes";
 import type { TaskReader } from "../src/sources/types";
+import { readOnly } from "./helpers/sources";
 
 const cfg: Config = {
   todayProjectId: "today",
@@ -15,13 +16,6 @@ let tasks: FakeTaskSource;
 let reads: TaskReader;
 let sources: Sources;
 
-/** The read part only. A handler that tries to write through it throws. */
-const readOnly = (t: FakeTaskSource): TaskReader => ({
-  listOpenTasks: (projectId) => t.listOpenTasks(projectId),
-  listHabits: (habitIds) => t.listHabits(habitIds),
-  listCheckins: (habitIds, from, to) => t.listCheckins(habitIds, from, to),
-});
-
 beforeEach(() => {
   tasks = new FakeTaskSource({
     tasks: [
@@ -33,7 +27,7 @@ beforeEach(() => {
     checkins: [{ habitId: "h1", stamp: "20261109" }],
   });
   reads = readOnly(tasks);
-  sources = { tasks: reads, calendar: new FakeCalendarSource([]), taskWriter: tasks };
+  sources = { tasks: reads, calendar: new FakeCalendarSource([]) };
   setDevFakes(null);
 });
 

@@ -1,14 +1,19 @@
 import type { Env } from "./env";
 import { addDays, localDay, mondayStamp, weeklyPercents } from "./domain/week";
 import { cleanTitle, validTaskId, withJobPrefix } from "./domain/input";
-import { NotConnectedError, type CalendarSource, type TaskReader, type TaskWriter } from "./sources/types";
+import {
+  NotConnectedError,
+  type CalendarSource,
+  type TaskReader,
+  type TaskWriter,
+  type TaskWrites,
+} from "./sources/types";
 import { sampleFakes } from "./sources/fakes";
 
+/** What the read routes use. The write part is separate: see `resolveTaskWrites`. */
 export interface Sources {
   tasks: TaskReader;
   calendar: CalendarSource;
-  /** Absent when writes are switched off. The write routes then answer `not_enabled`. */
-  taskWriter?: TaskWriter;
 }
 
 export interface Config {
@@ -38,35 +43,36 @@ export function readConfig(env: Env, usingFakes: boolean): Config | null {
   };
 }
 
-let devFakes: Sources | null = null;
+let devFakes: { sources: Sources; writes: TaskWrites } | null = null;
 
-function fakeSources(): Sources {
+function fakes(): { sources: Sources; writes: TaskWrites } {
   if (!devFakes) {
     const { tasks, calendar } = sampleFakes();
-    devFakes = { tasks, calendar, taskWriter: tasks };
+    devFakes = { sources: { tasks, calendar }, writes: tasks };
   }
   return devFakes;
 }
 
 /** Real clients arrive with the OAuth features; until then only fakes exist. */
 export function resolveSources(env: Env): Sources {
-  if (env.USE_FAKES === "true") return fakeSources();
+  if (env.USE_FAKES === "true") return fakes().sources;
   throw new NotConnectedError("ticktick");
 }
 
 /**
- * The write part, or null when writes are switched off. Only fake data has one: the real
- * TickTick client is read-only until steps 5, 6 and 8 add its write methods one by one.
+ * The write methods that are switched on. This is the only place that decides it.
+ * Fake data has all of them. The real TickTick client has none: steps 5, 6 and 8 add
+ * one each, after that route's own security review.
  * Never throws, so the write gate can be checked before any provider is looked at.
  */
-export function resolveTaskWriter(env: Env): TaskWriter | null {
-  if (env.USE_FAKES === "true") return fakeSources().taskWriter ?? null;
-  return null;
+export function resolveTaskWrites(env: Env): TaskWrites {
+  if (env.USE_FAKES === "true") return fakes().writes;
+  return {};
 }
 
-/** For tests: replace the dev fakes. */
-export function setDevFakes(s: Sources | null): void {
-  devFakes = s;
+/** For tests: replace the dev fakes. With no `writes`, no write method is switched on. */
+export function setDevFakes(sources: Sources | null, writes: TaskWrites = {}): void {
+  devFakes = sources ? { sources, writes } : null;
 }
 
 export function json(body: unknown, status = 200): Response {
@@ -130,7 +136,7 @@ export async function getToday(sources: Sources, cfg: Config, now: Date): Promis
 
 export async function completeTask(
   tasks: TaskReader,
-  writer: TaskWriter,
+  writer: Pick<TaskWriter, "completeTask">,
   cfg: Config,
   taskId: string,
 ): Promise<Response> {
@@ -143,7 +149,11 @@ export async function completeTask(
 }
 
 /** `body` is the request's JSON object, already read and checked by the router. */
-export async function addToNext(writer: TaskWriter, cfg: Config, body: Record<string, unknown>): Promise<Response> {
+export async function addToNext(
+  writer: Pick<TaskWriter, "createTask">,
+  cfg: Config,
+  body: Record<string, unknown>,
+): Promise<Response> {
   const title = cleanTitle(body.title);
   if (!title) return json({ error: "bad_title" }, 400);
   const task = await writer.createTask(cfg.nextProjectId, withJobPrefix(title, body.job));
@@ -154,7 +164,11 @@ export async function addToNext(writer: TaskWriter, cfg: Config, body: Record<st
  * Moves Today's leftovers to Next and adds one Minimum task. Safe to repeat: a second
  * tap (or a retry) leaves an already-fresh Today alone. Never deletes anything.
  */
-export async function restart(tasks: TaskReader, writer: TaskWriter, cfg: Config): Promise<Response> {
+export async function restart(
+  tasks: TaskReader,
+  writer: Pick<TaskWriter, "moveTask" | "createTask">,
+  cfg: Config,
+): Promise<Response> {
   const open = await tasks.listOpenTasks(cfg.todayProjectId);
   const leftovers = open.filter((t) => t.title !== cfg.minimumTask);
   const hasMinimum = open.some((t) => t.title === cfg.minimumTask);

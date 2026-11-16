@@ -1,15 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { routeRequest } from "../src/router";
-import { setDevFakes } from "../src/api";
+import { routeRequest, type VerifiedAccess } from "../src/router";
+import { setDevFakes, type Sources } from "../src/api";
 import { FakeCalendarSource, FakeTaskSource } from "../src/sources/fakes";
-import type { Task, TaskReader } from "../src/sources/types";
+import type { Task } from "../src/sources/types";
 import type { Env } from "../src/env";
+import { readOnly } from "./helpers/sources";
 
 // The routing that runs after the Access check, called directly. The Access check itself
 // is covered in access.test.ts and worker.test.ts.
 
 const HUB = "https://hub.example.com";
 const MINIMUM = "JOB: save 1 posting";
+
+/** What src/index.ts hands over once the Access token has been verified. */
+const OWNER: VerifiedAccess = { ok: true, email: "me@example.com", devBypass: false };
 
 const fakesOn = {
   TIME_ZONE: "America/Indiana/Indianapolis",
@@ -35,28 +39,40 @@ const JSON_FROM_HUB = { Origin: HUB, "Content-Type": "application/json" };
 
 let tasks: FakeTaskSource;
 
-/** The read part only. A handler that tries to write through it throws. */
-const readOnly = (t: FakeTaskSource): TaskReader => ({
-  listOpenTasks: (projectId) => t.listOpenTasks(projectId),
-  listHabits: (habitIds) => t.listHabits(habitIds),
-  listCheckins: (habitIds, from, to) => t.listCheckins(habitIds, from, to),
-});
+/** The read side of the fake data. The write side is handed to setDevFakes separately. */
+const reads = (): Sources => ({ tasks: readOnly(tasks), calendar: new FakeCalendarSource([]) });
 
 beforeEach(() => {
   tasks = new FakeTaskSource({ tasks: structuredClone(START) });
-  setDevFakes({ tasks: readOnly(tasks), calendar: new FakeCalendarSource([]), taskWriter: tasks });
+  // Every write method exists, unless a test says otherwise.
+  setDevFakes(reads(), tasks);
 });
 
 afterEach(() => setDevFakes(null));
 
-function post(env: Env, path: string, headers: Record<string, string>, body?: string): Promise<Response> {
-  return routeRequest(new Request(`${HUB}${path}`, { method: "POST", headers, body }), env);
+function post(env: Env, path: string, headers: Record<string, string>, body?: BodyInit): Promise<Response> {
+  return routeRequest(new Request(`${HUB}${path}`, { method: "POST", headers, body }), env, OWNER);
 }
 
 /** No task was completed, added or moved. */
 function expectNothingWritten(): void {
   expect(tasks.tasks).toEqual(START);
 }
+
+describe("Access", () => {
+  it("refuses a caller that has no verified Access result", async () => {
+    const notVerified = [undefined, null, { ok: false, status: 401, reason: "missing_token" }, { email: "me@example.com" }];
+    for (const access of notVerified) {
+      const forged = access as unknown as VerifiedAccess;
+      for (const { path, body } of WRITE_ROUTES) {
+        const request = new Request(`${HUB}${path}`, { method: "POST", headers: JSON_FROM_HUB, body });
+        expect((await routeRequest(request, fakesOn, forged)).status).toBe(401);
+      }
+      expect((await routeRequest(new Request(`${HUB}/api/today`), fakesOn, forged)).status).toBe(401);
+    }
+    expectNothingWritten();
+  });
+});
 
 describe("POST checks", () => {
   it("refuses a POST from another origin", async () => {
@@ -136,11 +152,60 @@ describe("POST checks", () => {
       const request = new Request(`${HUB}${path}`, { method: "POST", headers: JSON_FROM_HUB, body: tooBig });
       // No declared length to go by: the body itself has to be measured.
       expect(request.headers.get("Content-Length")).toBeNull();
-      const res = await routeRequest(request, fakesOn);
+      const res = await routeRequest(request, fakesOn, OWNER);
       expect(res.status).toBe(400);
       expect(await res.json()).toMatchObject({ error: "bad_body" });
     }
     expectNothingWritten();
+  });
+
+  it("stops reading a body once it is over 4096 bytes", async () => {
+    // 1000 chunks of 1024 bytes are on offer, with no Content-Length. Only the first few may be taken.
+    let pulled = 0;
+    const huge = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled++;
+        if (pulled > 1000) controller.close();
+        else controller.enqueue(new Uint8Array(1024).fill(0x20));
+      },
+    });
+    const res = await post(fakesOn, "/api/restart", JSON_FROM_HUB, huge);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "bad_body" });
+    expect(pulled).toBeLessThan(20);
+    expectNothingWritten();
+  });
+
+  it("refuses a body that is not valid UTF-8", async () => {
+    // {"title":"abc<0xFF><0xFE>"}: JSON apart from two bytes that are not UTF-8.
+    const text = new TextEncoder();
+    const notUtf8 = new Uint8Array([...text.encode('{"title":"abc'), 0xff, 0xfe, ...text.encode('"}')]);
+    for (const { path } of WRITE_ROUTES) {
+      const res = await post(fakesOn, path, JSON_FROM_HUB, notUtf8);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "bad_body" });
+    }
+    expectNothingWritten();
+  });
+
+  it("refuses a content type that only starts with application/json", async () => {
+    const lookalikes = ["application/jsonx", "application/json5", "application/json-patch+json"];
+    for (const { path, body } of WRITE_ROUTES) {
+      for (const type of lookalikes) {
+        const res = await post(fakesOn, path, { Origin: HUB, "Content-Type": type }, body);
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ error: "bad_body" });
+      }
+    }
+    expectNothingWritten();
+  });
+
+  it("accepts application/json with a charset, in any letter case", async () => {
+    const plain = await post(fakesOn, "/api/next", { Origin: HUB, "Content-Type": "application/json; charset=utf-8" }, '{"title":"One"}');
+    expect(plain.status).toBe(201);
+    const shouted = await post(fakesOn, "/api/next", { Origin: HUB, "Content-Type": "Application/JSON;charset=UTF-8" }, '{"title":"Two"}');
+    expect(shouted.status).toBe(201);
+    expect(tasks.tasks.slice(-2).map((t) => t.title)).toEqual(["One", "Two"]);
   });
 });
 
@@ -152,6 +217,46 @@ describe("write gate", () => {
       expect(res.status).toBe(503);
       expect(await res.json()).toEqual({ error: "not_enabled" });
     }
+    expectNothingWritten();
+  });
+
+  it("answers not_enabled for every write route when the source has no write methods", async () => {
+    setDevFakes(reads());
+    for (const { path, body } of WRITE_ROUTES) {
+      const res = await post(fakesOn, path, JSON_FROM_HUB, body);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "not_enabled" });
+    }
+    expectNothingWritten();
+  });
+
+  it("switches on only the route whose write method exists", async () => {
+    // What step 5 will look like: complete is real, add and Restart are not yet.
+    setDevFakes(reads(), { completeTask: (projectId, taskId) => tasks.completeTask(projectId, taskId) });
+
+    const added = await post(fakesOn, "/api/next", JSON_FROM_HUB, '{"title":"New thing"}');
+    expect(added.status).toBe(503);
+    expect(await added.json()).toEqual({ error: "not_enabled" });
+    const restarted = await post(fakesOn, "/api/restart", JSON_FROM_HUB, "{}");
+    expect(restarted.status).toBe(503);
+    expect(await restarted.json()).toEqual({ error: "not_enabled" });
+    expectNothingWritten();
+
+    const completed = await post(fakesOn, "/api/tasks/a/complete", JSON_FROM_HUB, "{}");
+    expect(completed.status).toBe(200);
+    expect(tasks.tasks.find((t) => t.id === "a")!.done).toBe(true);
+  });
+
+  it("keeps Restart off until both move and create exist", async () => {
+    setDevFakes(reads(), { createTask: (projectId, title) => tasks.createTask(projectId, title) });
+    const createOnly = await post(fakesOn, "/api/restart", JSON_FROM_HUB, "{}");
+    expect(createOnly.status).toBe(503);
+    expect(await createOnly.json()).toEqual({ error: "not_enabled" });
+
+    setDevFakes(reads(), { moveTask: (taskId, from, to) => tasks.moveTask(taskId, from, to) });
+    const moveOnly = await post(fakesOn, "/api/restart", JSON_FROM_HUB, "{}");
+    expect(moveOnly.status).toBe(503);
+    expect(await moveOnly.json()).toEqual({ error: "not_enabled" });
     expectNothingWritten();
   });
 
@@ -171,7 +276,7 @@ describe("write gate", () => {
   });
 
   it("answers not_connected for a read route when fake data is off", async () => {
-    const res = await routeRequest(new Request(`${HUB}/api/today`), fakesOff);
+    const res = await routeRequest(new Request(`${HUB}/api/today`), fakesOff, OWNER);
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: "not_connected", provider: "ticktick" });
   });

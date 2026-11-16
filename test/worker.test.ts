@@ -49,6 +49,31 @@ describe("Worker front door", () => {
     }
   });
 
+  it("answers 401 to everything when the Access settings are missing", async () => {
+    // The first deploy can run before the Access settings are entered (docs/deploy-checklist.md, check 1).
+    const noAccess = { TIME_ZONE: "America/Indiana/Indianapolis", USE_FAKES: "false" } as unknown as Env;
+    const page = await worker.fetch(new Request("https://hub.example.com/"), noAccess);
+    expect(page.status).toBe(401);
+    expect(await page.text()).toBe("Unauthorized");
+
+    const write = await worker.fetch(
+      new Request("https://hub.example.com/api/restart", {
+        method: "POST",
+        headers: { Origin: "https://hub.example.com", "Content-Type": "application/json" },
+        body: "{}",
+      }),
+      noAccess,
+    );
+    expect(write.status).toBe(401);
+  });
+
+  it("lets the page's own requests carry their Origin", async () => {
+    // Under `no-referrer` a browser sends `Origin: null` on some same-site POSTs, which the
+    // same-origin check would refuse. `same-origin` still sends nothing to other sites.
+    const res = await SELF.fetch("https://hub.example.com/");
+    expect(res.headers.get("Referrer-Policy")).toBe("same-origin");
+  });
+
   it("has no scheduled handler", () => {
     // v1 has no cron (H2). A handler here would run with no Access check in front of it.
     expect((worker as ExportedHandler<Env>).scheduled).toBeUndefined();

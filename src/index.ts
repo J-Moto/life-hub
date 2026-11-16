@@ -7,7 +7,9 @@ const SECURITY_HEADERS: Record<string, string> = {
   "Content-Security-Policy":
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
   "X-Content-Type-Options": "nosniff",
-  "Referrer-Policy": "no-referrer",
+  // Not `no-referrer`: under it a browser sends `Origin: null` on some same-site POSTs, which
+  // the same-origin check refuses. `same-origin` still sends nothing to other sites.
+  "Referrer-Policy": "same-origin",
   "X-Frame-Options": "DENY",
   "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
   "Strict-Transport-Security": "max-age=31536000",
@@ -27,7 +29,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
     console.warn("access_denied", access.reason);
     return new Response("Unauthorized", { status: access.status === 403 ? 403 : 401 });
   }
-  return routeRequest(request, env);
+  return routeRequest(request, env, access);
 }
 
 // `fetch` is the only handler. v1 has no cron, so there is no `scheduled` handler.

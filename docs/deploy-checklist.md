@@ -25,8 +25,9 @@ At the first deploy Wrangler may create the KV namespace and write its ID into `
 | 4 | There is no preview address | In the Cloudflare dashboard, open the Worker's settings for its addresses | Preview URLs are switched off. Only the workers.dev address is listed. |
 | 5 | There is no cron | In the Cloudflare dashboard, open the Worker's trigger settings | No Cron Trigger is listed |
 | 6 | Signed in, nothing reaches TickTick | Sign in, open `https://<hub>/api/today`, then press Restart on the page | `/api/today` answers `not_connected` (TickTick isn't connected until step 4). Restart reports a failure, and nothing changes in TickTick. |
+| 7 | From the page, complete and add send and are not refused with 403 | Signed in, with the browser's developer tools open on the Network tab: add a task from the box. From step 4 on, when the Today list shows, tick a task too. | The hub answers the POST itself: `not_enabled` (503) until that route's own step (5 for complete, 6 for add), success after it. Never 403 `cross_site`, which would mean the browser didn't send the page's `Origin`. |
 
-Checks 2 and 4 are the two that step 1a's "done when" names.
+Checks 2 and 4 are the two that step 1a's "done when" names. Check 7 is run again after steps 5 and 6.
 
 ## Record
 

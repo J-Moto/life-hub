@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import type { AccessResult } from "./auth/access";
 import { isSameOrigin } from "./auth/origin";
 import {
   addToNext,
@@ -7,13 +8,16 @@ import {
   json,
   readConfig,
   resolveSources,
-  resolveTaskWriter,
+  resolveTaskWrites,
   restart,
   type Config,
   type Sources,
 } from "./api";
 import { readJson } from "./domain/input";
-import { NotConnectedError } from "./sources/types";
+import { NotConnectedError, type TaskWriter, type TaskWrites } from "./sources/types";
+
+/** Proof that the Access check passed. Only `verifyAccess` produces one. */
+export type VerifiedAccess = Extract<AccessResult, { ok: true }>;
 
 type WriteRoute = { kind: "complete"; taskId: string } | { kind: "next" } | { kind: "restart" };
 
@@ -39,6 +43,49 @@ function sourcesAndConfig(env: Env): { sources: Sources; cfg: Config } | Respons
   return { sources, cfg };
 }
 
+/** True when every named write method is switched on. */
+function has<K extends keyof TaskWriter>(
+  writes: TaskWrites,
+  ...methods: K[]
+): writes is TaskWrites & Pick<TaskWriter, K> {
+  return methods.every((m) => typeof writes[m] === "function");
+}
+
+const notEnabled = (): Response => json({ error: "not_enabled" }, 503);
+
+/**
+ * A write route. The write gate comes first, per route: a route whose own write methods
+ * aren't switched on answers `not_enabled`, whatever else is connected or configured.
+ * Each handler's parameter type names the methods it uses, so a gate that checks the
+ * wrong ones doesn't compile.
+ */
+async function runWrite(write: WriteRoute, body: Record<string, unknown>, env: Env): Promise<Response> {
+  const writes = resolveTaskWrites(env);
+  switch (write.kind) {
+    case "complete": {
+      if (!has(writes, "completeTask")) return notEnabled();
+      const ready = sourcesAndConfig(env);
+      if (ready instanceof Response) return ready;
+      return completeTask(ready.sources.tasks, writes, ready.cfg, write.taskId);
+    }
+    case "next": {
+      if (!has(writes, "createTask")) return notEnabled();
+      const ready = sourcesAndConfig(env);
+      if (ready instanceof Response) return ready;
+      return addToNext(writes, ready.cfg, body);
+    }
+    case "restart": {
+      if (!has(writes, "moveTask", "createTask")) return notEnabled();
+      const ready = sourcesAndConfig(env);
+      if (ready instanceof Response) return ready;
+      return restart(ready.sources.tasks, writes, ready.cfg);
+    }
+    default:
+      // A write route with no case above is a compile error, not a 404.
+      return write satisfies never;
+  }
+}
+
 async function routeApi(
   method: string,
   pathname: string,
@@ -46,24 +93,7 @@ async function routeApi(
   env: Env,
 ): Promise<Response> {
   const write = method === "POST" ? matchWriteRoute(pathname) : null;
-  if (write && body) {
-    // Write gate. Checked first, so a write route that isn't switched on answers
-    // `not_enabled` whatever else is connected or configured.
-    const writer = resolveTaskWriter(env);
-    if (!writer) return json({ error: "not_enabled" }, 503);
-
-    const ready = sourcesAndConfig(env);
-    if (ready instanceof Response) return ready;
-    const { sources, cfg } = ready;
-    switch (write.kind) {
-      case "complete":
-        return completeTask(sources.tasks, writer, cfg, write.taskId);
-      case "next":
-        return addToNext(writer, cfg, body);
-      case "restart":
-        return restart(sources.tasks, writer, cfg);
-    }
-  }
+  if (write && body) return runWrite(write, body, env);
 
   if (method === "GET" && pathname === "/api/today") {
     const ready = sourcesAndConfig(env);
@@ -75,10 +105,15 @@ async function routeApi(
 }
 
 /**
- * Everything that happens after the Access check. It does NOT check Access itself:
- * the only caller is `src/index.ts`, which has already verified the Access token.
+ * Everything that happens after the Access check. It does not verify the Access token
+ * itself, so it can't be called without the result of a check that passed: `access` is
+ * what `verifyAccess` returned.
  */
-export async function routeRequest(request: Request, env: Env): Promise<Response> {
+export async function routeRequest(request: Request, env: Env, access: VerifiedAccess): Promise<Response> {
+  // The type already demands a passed check. This repeats it at run time, so a caller
+  // that gets here some other way is refused, not served.
+  if (access?.ok !== true) return new Response("Unauthorized", { status: 401 });
+
   const url = new URL(request.url);
   const method = request.method;
   const readOnly = method === "GET" || method === "HEAD";
