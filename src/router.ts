@@ -1,5 +1,5 @@
 import type { Env } from "./env";
-import type { AccessResult } from "./auth/access";
+import { isVerifiedAccess, type VerifiedAccess } from "./auth/access";
 import { isSameOrigin } from "./auth/origin";
 import {
   addToNext,
@@ -15,9 +15,6 @@ import {
 } from "./api";
 import { readJson } from "./domain/input";
 import { NotConnectedError, type TaskWriter, type TaskWrites } from "./sources/types";
-
-/** Proof that the Access check passed. Only `verifyAccess` produces one. */
-export type VerifiedAccess = Extract<AccessResult, { ok: true }>;
 
 type WriteRoute = { kind: "complete"; taskId: string } | { kind: "next" } | { kind: "restart" };
 
@@ -107,12 +104,12 @@ async function routeApi(
 /**
  * Everything that happens after the Access check. It does not verify the Access token
  * itself, so it can't be called without the result of a check that passed: `access` is
- * what `verifyAccess` returned.
+ * what `verifyAccess` returned, and nothing else is accepted (see `VerifiedAccess`).
  */
 export async function routeRequest(request: Request, env: Env, access: VerifiedAccess): Promise<Response> {
   // The type already demands a passed check. This repeats it at run time, so a caller
-  // that gets here some other way is refused, not served.
-  if (access?.ok !== true) return new Response("Unauthorized", { status: 401 });
+  // that gets here some other way, or with an object it built itself, is refused.
+  if (!isVerifiedAccess(access)) return new Response("Unauthorized", { status: 401 });
 
   const url = new URL(request.url);
   const method = request.method;
