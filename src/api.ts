@@ -10,10 +10,13 @@ import {
 } from "./sources/types";
 import { sampleFakes } from "./sources/fakes";
 
-/** What the read routes use. The write part is separate: see `resolveTaskWrites`. */
+/**
+ * What the read routes use, one part per section. A part is null when that provider is not
+ * connected; the other sections still answer. The write part is separate: see `resolveTaskWrites`.
+ */
 export interface Sources {
-  tasks: TaskReader;
-  calendar: CalendarSource;
+  tasks: TaskReader | null;
+  calendar: CalendarSource | null;
 }
 
 export interface Config {
@@ -25,7 +28,43 @@ export interface Config {
 }
 
 const DEFAULT_MINIMUM = "JOB: Open a job board, save 1 posting (done = 1 saved)";
+const DEFAULT_TIME_ZONE = "America/Indiana/Indianapolis";
 
+/** What each read route needs, and nothing more: each section has its own settings. */
+export interface TasksConfig {
+  todayProjectId: string;
+  timeZone: string;
+}
+export interface HabitsConfig {
+  habitIds: string[];
+  timeZone: string;
+}
+export interface CalendarConfig {
+  timeZone: string;
+}
+
+/** Fake data fills in what a setting would, so every section shows data in local dev. */
+export function readTasksConfig(env: Env, usingFakes: boolean): TasksConfig | null {
+  const today = env.TICKTICK_TODAY_PROJECT_ID || (usingFakes ? "today" : undefined);
+  if (!today) return null;
+  return { todayProjectId: today, timeZone: env.TIME_ZONE || DEFAULT_TIME_ZONE };
+}
+
+export function readHabitsConfig(env: Env, usingFakes: boolean): HabitsConfig | null {
+  const habitIds = (env.TICKTICK_HABIT_IDS ?? (usingFakes ? "h-job,h-phone,h-home" : ""))
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (habitIds.length === 0) return null;
+  return { habitIds, timeZone: env.TIME_ZONE || DEFAULT_TIME_ZONE };
+}
+
+/** `CALENDAR_IDS` is read here from step 3b on; until then the calendar needs only the time zone. */
+export function readCalendarConfig(env: Env, _usingFakes: boolean): CalendarConfig | null {
+  return { timeZone: env.TIME_ZONE || DEFAULT_TIME_ZONE };
+}
+
+/** For the write routes, which need both project IDs. */
 export function readConfig(env: Env, usingFakes: boolean): Config | null {
   const today = env.TICKTICK_TODAY_PROJECT_ID ?? (usingFakes ? "today" : undefined);
   const next = env.TICKTICK_NEXT_PROJECT_ID ?? (usingFakes ? "next" : undefined);
@@ -39,7 +78,7 @@ export function readConfig(env: Env, usingFakes: boolean): Config | null {
     nextProjectId: next,
     habitIds: habits,
     minimumTask: env.MINIMUM_TASK_TEXT?.trim() || DEFAULT_MINIMUM,
-    timeZone: env.TIME_ZONE || "America/Indiana/Indianapolis",
+    timeZone: env.TIME_ZONE || DEFAULT_TIME_ZONE,
   };
 }
 
@@ -54,9 +93,16 @@ function fakes(): { sources: Sources; writes: TaskWrites } {
 }
 
 /** Real clients arrive with the OAuth features; until then only fakes exist. */
-export function resolveSources(env: Env): Sources {
-  if (env.USE_FAKES === "true") return fakes().sources;
-  throw new NotConnectedError("ticktick");
+export function resolveTasks(env: Env): TaskReader {
+  const tasks = env.USE_FAKES === "true" ? fakes().sources.tasks : null;
+  if (!tasks) throw new NotConnectedError("ticktick");
+  return tasks;
+}
+
+export function resolveCalendar(env: Env): CalendarSource {
+  const calendar = env.USE_FAKES === "true" ? fakes().sources.calendar : null;
+  if (!calendar) throw new NotConnectedError("google");
+  return calendar;
 }
 
 /**
@@ -102,36 +148,46 @@ export function localMidnight(isoDate: string, timeZone: string): string {
   return `${isoDate}T00:00:00${offsetFor(instant, timeZone)}`;
 }
 
-export async function getToday(sources: Sources, cfg: Config, now: Date): Promise<Response> {
+// The three read handlers. Each answers for one section; a provider failure is thrown, and
+// the router turns it into the right answer (`not_connected`, or a 500 the page shows as a failure).
+
+/** Today's unfinished tasks, and which write routes are switched on. */
+export async function getTasks(
+  tasks: TaskReader,
+  cfg: Pick<TasksConfig, "todayProjectId" | "timeZone">,
+  now: Date,
+  writes: TaskWrites,
+): Promise<Response> {
+  const day = localDay(now, cfg.timeZone);
+  const open = await tasks.listOpenTasks(cfg.todayProjectId);
+  return json({
+    date: day.isoDate,
+    tasks: open.map((t) => ({ id: t.id, title: t.title, job: /^JOB:/i.test(t.title) })),
+    // The same rule as the write gate in the router: a route is on when its methods exist.
+    writes: {
+      complete: typeof writes.completeTask === "function",
+      next: typeof writes.createTask === "function",
+      restart: typeof writes.moveTask === "function" && typeof writes.createTask === "function",
+    },
+  });
+}
+
+/** The current day's calendar events. */
+export async function getCalendar(calendar: CalendarSource, cfg: CalendarConfig, now: Date): Promise<Response> {
   const day = localDay(now, cfg.timeZone);
   const start = localMidnight(day.isoDate, cfg.timeZone);
   const end = localMidnight(addDays(day.isoDate, 1), cfg.timeZone);
+  return json({ date: day.isoDate, events: await calendar.listEvents(start, end) });
+}
 
-  const [tasks, events, habits, checkins] = await Promise.allSettled([
-    sources.tasks.listOpenTasks(cfg.todayProjectId),
-    sources.calendar.listEvents(start, end),
-    sources.tasks.listHabits(cfg.habitIds),
-    sources.tasks.listCheckins(cfg.habitIds, mondayStamp(day), day.stamp),
+/** Weekly habit percentages. */
+export async function getHabits(tasks: TaskReader, cfg: HabitsConfig, now: Date): Promise<Response> {
+  const day = localDay(now, cfg.timeZone);
+  const [habits, checkins] = await Promise.all([
+    tasks.listHabits(cfg.habitIds),
+    tasks.listCheckins(cfg.habitIds, mondayStamp(day), day.stamp),
   ]);
-
-  const problems: string[] = [];
-  if (tasks.status === "rejected") problems.push("tasks");
-  if (events.status === "rejected") problems.push("calendar");
-  if (habits.status === "rejected" || checkins.status === "rejected") problems.push("habits");
-
-  return json({
-    date: day.isoDate,
-    today:
-      tasks.status === "fulfilled"
-        ? tasks.value.map((t) => ({ id: t.id, title: t.title, job: /^JOB:/i.test(t.title) }))
-        : null,
-    calendar: events.status === "fulfilled" ? events.value : null,
-    habits:
-      habits.status === "fulfilled" && checkins.status === "fulfilled"
-        ? weeklyPercents(day, habits.value, checkins.value)
-        : null,
-    problems,
-  });
+  return json({ date: day.isoDate, habits: weeklyPercents(day, habits, checkins) });
 }
 
 export async function completeTask(

@@ -5,3 +5,5 @@ main { max-width: 720px; margin: 0 auto; padding: 32px 20px; display: flex; flex
 ul { padding-left: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
 li { display: flex; gap: 12px; align-items: center; min-height: 44px; }
 input, button { font: inherit; min-height: 44px; }
+[hidden] { display: none !important; }
+.note, .updated { margin: 0; opacity: 0.8; }
