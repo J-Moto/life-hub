@@ -45,7 +45,7 @@ export interface CalendarConfig {
 
 /** Fake data fills in what a setting would, so every section shows data in local dev. */
 export function readTasksConfig(env: Env, usingFakes: boolean): TasksConfig | null {
-  const today = env.TICKTICK_TODAY_PROJECT_ID || (usingFakes ? "today" : undefined);
+  const today = env.TICKTICK_TODAY_PROJECT_ID ?? (usingFakes ? "today" : undefined);
   if (!today) return null;
   return { todayProjectId: today, timeZone: env.TIME_ZONE || DEFAULT_TIME_ZONE };
 }

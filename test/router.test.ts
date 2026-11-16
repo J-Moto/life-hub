@@ -391,6 +391,16 @@ describe("write gate", () => {
     expect((await tasks.listOpenTasks("today")).map((t) => t.title)).toEqual([MINIMUM]);
   });
 
+  it("answers not_configured for each write route when a project ID is an empty string", async () => {
+    const empty = { ...fakesOn, TICKTICK_TODAY_PROJECT_ID: "", TICKTICK_NEXT_PROJECT_ID: "next" } as Env;
+    for (const { path, body } of WRITE_ROUTES) {
+      const res = await post(empty, path, JSON_FROM_HUB, body);
+      expect(res.status, path).toBe(503);
+      expect(await res.json(), path).toEqual({ error: "not_configured" });
+    }
+    expectNothingWritten();
+  });
+
   it("answers not_connected for each read route when fake data is off", async () => {
     // Providers are resolved before settings are read, so not_connected comes first.
     const providerFor: Record<string, string> = {

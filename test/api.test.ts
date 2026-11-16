@@ -137,6 +137,11 @@ describe("settings per section", () => {
     expect(readTasksConfig(env({ TICKTICK_TODAY_PROJECT_ID: "t" }), false)).toMatchObject({ todayProjectId: "t" });
   });
 
+  it("an empty Today project ID is not configured, with or without fake data", () => {
+    expect(readTasksConfig(env({ TICKTICK_TODAY_PROJECT_ID: "" }), false)).toBeNull();
+    expect(readTasksConfig(env({ TICKTICK_TODAY_PROJECT_ID: "" }), true)).toBeNull();
+  });
+
   it("habits need habit IDs and nothing about projects", () => {
     expect(readHabitsConfig(env({}), false)).toBeNull();
     expect(readHabitsConfig(env({ TICKTICK_HABIT_IDS: " , " }), false)).toBeNull();
