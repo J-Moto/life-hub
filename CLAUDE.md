@@ -7,7 +7,7 @@ Read `docs/design/v1.md` (the plan) and `DESIGN.md` (look and feel) before build
 
 ## Stack
 - One Cloudflare Worker: static assets (the page) and `/api/*` routes. No cron in v1. TypeScript.
-- Reads TickTick Open API and Google Calendar via OAuth2. Stores none of their data. Only exception: OAuth tokens, encrypted (AES-GCM, key in a Worker secret) in KV. KV also holds a 10-minute login state (provider, PKCE verifier, hash of the Access email; `docs/design/v1.md` G6b).
+- Reads TickTick Open API and Google Calendar via OAuth2. Stores none of their data. Only exception: OAuth tokens, encrypted (AES-GCM, key in a Worker secret) in KV. KV also holds a 10-minute login state (provider, PKCE verifier, hash of the Access email, hash of the login cookie's value; `docs/design/v1.md` G6b).
 - Protected by Cloudflare Access. The Worker also validates the `Cf-Access-Jwt-Assertion` header itself.
 - Tests: Vitest with the Cloudflare Workers test pool.
 
