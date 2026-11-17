@@ -20,7 +20,7 @@ import {
 } from "./api";
 import type { Provider } from "./crypto/tokens";
 import { readJson } from "./domain/input";
-import { connect } from "./setup";
+import { connect, oauthCallback } from "./setup";
 import { NotConnectedError, type TaskReader, type TaskWriter, type TaskWrites } from "./sources/types";
 
 type WriteRoute = { kind: "complete"; taskId: string } | { kind: "next" } | { kind: "restart" };
@@ -154,6 +154,7 @@ async function routeApi(
 // `:provider` is one of the two literal names. Nothing is decoded, so an encoded or
 // differently cased name is simply not a route.
 const CONNECT_ROUTE = /^\/setup\/connect\/(ticktick|google)$/;
+const CALLBACK_ROUTE = /^\/oauth\/(ticktick|google)\/callback$/;
 
 const methodNotAllowed = (allow: string): Response =>
   new Response("Method not allowed", { status: 405, headers: { Allow: allow } });
@@ -176,6 +177,14 @@ async function routeSetup(
     // `body` is set only for a POST that passed the same-origin and JSON checks below.
     if (!body) return methodNotAllowed("POST");
     return connect(request, env, access, connectTo[1] as Provider);
+  }
+
+  // The one GET that writes, so it is routed by name and by method: a HEAD does not run it.
+  // Its checks are G6b's (state, cookie, Access email), inside `oauthCallback`.
+  const callbackFrom = pathname.match(CALLBACK_ROUTE);
+  if (callbackFrom) {
+    if (request.method !== "GET") return methodNotAllowed("GET");
+    return oauthCallback(request, env, access, callbackFrom[1] as Provider);
   }
 
   return json({ error: "not_found" }, 404);

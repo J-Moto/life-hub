@@ -8,8 +8,16 @@ import type { Env } from "./env";
 import type { VerifiedAccess } from "./auth/access";
 import { json } from "./api";
 import { TokenStore, importKey, type Provider } from "./crypto/tokens";
-import { googleClient, googleSignInUrl, type GoogleClient } from "./oauth/google";
-import { issueLoginState } from "./oauth/state";
+import {
+  GOOGLE_SCOPE,
+  exchangeGoogleCode,
+  googleClient,
+  googleSignInUrl,
+  revokeGoogleToken,
+  sameScopes,
+  type GoogleClient,
+} from "./oauth/google";
+import { clearLoginCookie, consumeLoginState, issueLoginState, randomToken } from "./oauth/state";
 
 const notConfigured = (): Response => json({ error: "not_configured" }, 503);
 
@@ -75,4 +83,94 @@ export async function connect(request: Request, env: Env, access: VerifiedAccess
   const res = json({ url });
   res.headers.set("Set-Cookie", login.cookie);
   return res;
+}
+
+/** How a callback ended. It travels to /setup as this one fixed word, and nothing else does. */
+type CallbackResult = "connected" | "failed";
+
+/**
+ * The callback contract, in order (docs/design/v1.md, step 2). Returns how it ended; a
+ * thrown error (a failed exchange, KV down) is a failure too, handled by `oauthCallback`.
+ */
+async function finishLogin(
+  request: Request,
+  env: Env,
+  access: VerifiedAccess,
+  provider: Provider,
+): Promise<CallbackResult> {
+  // Real connections are made on the deployed hub only (G7).
+  if (access.devBypass) return "failed";
+
+  const url = new URL(request.url);
+  const now = Date.now();
+
+  // Consume first. This also checks the provider against the path, the creation time, the
+  // cookie and the Access email. From here on the state can't be used again.
+  const login = await consumeLoginState(env.TOKENS, {
+    state: url.searchParams.get("state") ?? "",
+    cookieHeader: request.headers.get("Cookie"),
+    provider,
+    email: access.email,
+    now,
+  });
+  if (!login) return "failed";
+
+  // The provider reported an error (say, the owner pressed Cancel). Its text is not read.
+  if (url.searchParams.has("error")) return "failed";
+  const code = url.searchParams.get("code");
+  if (!code) return "failed";
+
+  // No TickTick state can exist before step 4, so this is never reached for it.
+  if (provider !== "google") return "failed";
+  const settings = await loginSettings(env, url.origin);
+  if (!settings) return "failed";
+
+  // Temporary test switch: only the Worker var, set to exactly "true", sends a wrong
+  // verifier. Nothing in the request is consulted. Step 10 removes this.
+  const verifier = env.PKCE_TEST_WRONG_VERIFIER === "true" ? randomToken() : login.verifier;
+  // A failed exchange throws: nothing has been written, and an existing record is untouched.
+  const grant = await exchangeGoogleCode(settings.client, { code, verifier, redirectUri: settings.redirectUri }, now);
+
+  // Without a refresh token the hub would look connected for an hour and then ask again.
+  // With another scope the token is not the one G4 allows. Either way nothing is stored,
+  // and the grant Google just made is given back.
+  if (!grant.refreshToken || !sameScopes(grant.scope, GOOGLE_SCOPE)) {
+    await revokeGoogleToken(grant.refreshToken ?? grant.accessToken);
+    return "failed";
+  }
+
+  try {
+    await settings.store.put("google", { ...grant, connectedAt: now });
+  } catch {
+    // A grant the hub can't hold is not left behind at Google.
+    await revokeGoogleToken(grant.refreshToken);
+    return "failed";
+  }
+  return "connected";
+}
+
+/**
+ * Finishes a connection. The one GET that writes: it is guarded by the `state`, its cookie
+ * and the Access email (G6b), not by the F5 checks. Whatever happens, the answer is a 303
+ * to /setup with the cookie cleared and nothing cached, so the code never stays in the
+ * address bar.
+ */
+export async function oauthCallback(
+  request: Request,
+  env: Env,
+  access: VerifiedAccess,
+  provider: Provider,
+): Promise<Response> {
+  let result: CallbackResult = "failed";
+  try {
+    result = await finishLogin(request, env, access, provider);
+  } catch (e) {
+    // The error's name only: messages can hold addresses.
+    console.warn("oauth_callback_error", e instanceof Error ? e.name : "unknown");
+  }
+  console.log("oauth_callback", provider, result);
+  return new Response(null, {
+    status: 303,
+    headers: { Location: `/setup?result=${result}`, "Cache-Control": "no-store", "Set-Cookie": clearLoginCookie() },
+  });
 }

@@ -17,6 +17,7 @@ export const GOOGLE_SCOPE = "https://www.googleapis.com/auth/calendar.events.rea
 
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
+const REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 const FORM_HEADERS = { "Content-Type": "application/x-www-form-urlencoded" };
 /** An access token with less than this left counts as expired (G5). */
 const EXPIRY_MARGIN_MS = 60_000;
@@ -84,6 +85,62 @@ function readGrant(json: unknown, now: number): TokenGrant | null {
 
 const errorCode = (json: unknown): unknown =>
   json && typeof json === "object" ? (json as Record<string, unknown>).error : undefined;
+
+/**
+ * True when the scope a provider returned is exactly the one requested, compared as sets of
+ * space-separated, case-sensitive values. A missing or empty scope is not a match.
+ */
+export function sameScopes(returned: string | undefined, requested: string): boolean {
+  const values = (scope: string): Set<string> => new Set(scope.split(" ").filter(Boolean));
+  const got = values(returned ?? "");
+  const wanted = values(requested);
+  return got.size > 0 && got.size === wanted.size && [...wanted].every((scope) => got.has(scope));
+}
+
+export interface CodeExchange {
+  code: string;
+  /** The PKCE verifier whose challenge went out with the sign-in address. */
+  verifier: string;
+  /** The same fixed address the sign-in address named. */
+  redirectUri: string;
+}
+
+/** Exchanges the callback's code for tokens. Anything but a token answer throws. */
+export async function exchangeGoogleCode(client: GoogleClient, exchange: CodeExchange, now: number): Promise<TokenGrant> {
+  const { status, json } = await providerFetch("google.token", TOKEN_URL, {
+    method: "POST",
+    headers: FORM_HEADERS,
+    body: new URLSearchParams({
+      code: exchange.code,
+      client_id: client.clientId,
+      client_secret: client.clientSecret,
+      redirect_uri: exchange.redirectUri,
+      grant_type: "authorization_code",
+      code_verifier: exchange.verifier,
+    }).toString(),
+  });
+  const grant = status === 200 ? readGrant(json, now) : null;
+  if (!grant) throw new ProviderError("refused");
+  return grant;
+}
+
+/**
+ * Asks Google to revoke a token. Revoking a refresh token, or an access token that has one,
+ * ends the whole grant. The token goes in the form body, never in the address. Returns
+ * whether Google said it was done; never throws.
+ */
+export async function revokeGoogleToken(token: string): Promise<boolean> {
+  try {
+    const { status } = await providerFetch("google.revoke", REVOKE_URL, {
+      method: "POST",
+      headers: FORM_HEADERS,
+      body: new URLSearchParams({ token }).toString(),
+    });
+    return status === 200;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Asks Google for a new access token. `invalid_grant` means the refresh token no longer

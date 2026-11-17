@@ -4,20 +4,23 @@ import worker from "../src/index";
 import type { VerifiedAccess } from "../src/auth/access";
 import { TokenStore, importKey, type StoredToken } from "../src/crypto/tokens";
 import type { Env } from "../src/env";
-import { googleAccessToken, googleSignInUrl } from "../src/oauth/google";
+import { googleAccessToken, googleSignInUrl, sameScopes } from "../src/oauth/google";
 import { providerFetch } from "../src/oauth/provider-fetch";
 import { clearLoginCookie, consumeLoginState, issueLoginState } from "../src/oauth/state";
 import { routeRequest } from "../src/router";
 import { NotConfiguredError, NotConnectedError } from "../src/sources/types";
 import { ownerAccess } from "./helpers/access";
 import {
+  GOOGLE_REVOKE_URL,
   GOOGLE_SCOPE,
   GOOGLE_TOKEN_URL,
   googleRefreshed,
+  googleTokens,
   mockProviders,
   neverAnswers,
   oauthError,
   redirectTo,
+  revoked,
   type MockedProviders,
 } from "./helpers/providers";
 
@@ -127,6 +130,64 @@ function post(
 /** A GET past the Access check as the owner. */
 const get = (path: string, e: Env = hubEnv(), headers: Record<string, string> = {}): Promise<Response> =>
   routeRequest(new Request(`${HUB}${path}`, { headers }), e, OWNER);
+
+/** What the owner's browser holds after connect: the state on its way to Google, and the cookie. */
+interface Login {
+  state: string;
+  challenge: string;
+  /** As the browser sends it back: `name=value`. */
+  cookie: string;
+}
+
+/** Presses Connect for Google as the owner. */
+async function startLogin(e: Env = hubEnv(), body = "{}"): Promise<Login> {
+  const res = await post("/setup/connect/google", e, { body });
+  expect(res.status).toBe(200);
+  const address = new URL(((await res.json()) as { url: string }).url);
+  return {
+    state: address.searchParams.get("state")!,
+    challenge: address.searchParams.get("code_challenge")!,
+    cookie: asCookieHeader(res.headers.get("Set-Cookie")!),
+  };
+}
+
+interface CallbackOptions {
+  e?: Env;
+  /** What comes back beside the state. Default: a code. */
+  query?: Record<string, string>;
+  path?: string;
+  headers?: Record<string, string>;
+  access?: VerifiedAccess;
+}
+
+/** Google's redirect back to the hub, as the owner's browser makes it. */
+function callback(login: Pick<Login, "state" | "cookie">, o: CallbackOptions = {}): Promise<Response> {
+  const query = new URLSearchParams({ state: login.state, ...(o.query ?? { code: "the-code" }) });
+  const request = new Request(`${HUB}${o.path ?? "/oauth/google/callback"}?${query}`, {
+    headers: { ...(login.cookie ? { Cookie: login.cookie } : {}), ...o.headers },
+  });
+  return routeRequest(request, o.e ?? hubEnv(), o.access ?? OWNER);
+}
+
+/** The callback's one kind of answer: back to /setup with a fixed word, uncached, the cookie cleared. */
+async function expectSentBack(res: Response, result: "connected" | "failed", label = ""): Promise<void> {
+  expect(res.status, label).toBe(303);
+  expect(res.headers.get("Location"), label).toBe(`/setup?result=${result}`);
+  expect(res.headers.get("Cache-Control"), label).toBe("no-store");
+  expect(res.headers.get("Set-Cookie"), label).toBe("__Host-hub_login=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0");
+  expect(await res.text(), label).toBe("");
+}
+
+const allKeys = async (): Promise<string[]> => (await env.TOKENS.list()).keys.map((k) => k.name);
+
+/** KV in which a token record can't be written. Everything else works. */
+const kvThatCannotStoreTokens = (): KVNamespace =>
+  ({
+    get: (key: string) => env.TOKENS.get(key),
+    delete: (key: string) => env.TOKENS.delete(key),
+    put: (key: string, value: string, options?: KVNamespacePutOptions) =>
+      key.startsWith("oauth:") ? Promise.reject(new Error("KV put failed")) : env.TOKENS.put(key, value, options),
+  }) as unknown as KVNamespace;
 
 describe("state", () => {
   const issue = (now = T0) => issueLoginState(env.TOKENS, "google", OWNER_EMAIL, now);
@@ -634,6 +695,324 @@ describe("Connect", () => {
 
   it("connect for TickTick answers not_configured until step 4 builds it", async () => {
     await expectNotConfigured(await post("/setup/connect/ticktick"));
+  });
+});
+
+describe("Callback", () => {
+  const storedGoogle = async () => (await tokenStore()).get("google");
+
+  it("the callback stores only an encrypted record", async () => {
+    const login = await startLogin();
+    providers.answer(GOOGLE_TOKEN_URL, googleTokens());
+    const before = Date.now();
+    const res = await callback(login);
+    const after = Date.now();
+    await expectSentBack(res, "connected");
+
+    // One request to Google: the code exchange, as its docs describe it, with the PKCE verifier.
+    expect(providers.calls).toHaveLength(1);
+    const [exchange] = providers.calls;
+    expect(exchange).toMatchObject({ url: GOOGLE_TOKEN_URL, method: "POST", redirect: "manual" });
+    expect(exchange!.headers.get("Content-Type")).toBe("application/x-www-form-urlencoded");
+    const { code_verifier, ...form } = Object.fromEntries(exchange!.form);
+    expect(form).toEqual({
+      code: "the-code",
+      client_id: "test-google-client-id",
+      client_secret: "test-google-client-secret",
+      redirect_uri: "https://hub.example.com/oauth/google/callback",
+      grant_type: "authorization_code",
+    });
+    expect(await s256(code_verifier!)).toBe(login.challenge);
+
+    // KV holds the token record and nothing else: the login state is used up.
+    expect(await allKeys()).toEqual(["oauth:google"]);
+    const raw = (await env.TOKENS.get("oauth:google"))!;
+    expect(raw.startsWith("v1.")).toBe(true);
+    expect(raw).not.toContain("google-access-one");
+    expect(raw).not.toContain("google-refresh-one");
+
+    // Under the key it is the connection: both tokens, the scope, the expiry and when it was made.
+    const token = (await storedGoogle())!;
+    expect(token).toMatchObject({ accessToken: "google-access-one", refreshToken: "google-refresh-one", scope: GOOGLE_SCOPE });
+    expect(token.expiresAt).toBeGreaterThanOrEqual(before + 3_920_000);
+    expect(token.expiresAt).toBeLessThanOrEqual(after + 3_920_000);
+    expect(token.connectedAt).toBeGreaterThanOrEqual(before);
+    expect(token.connectedAt).toBeLessThanOrEqual(after);
+  });
+
+  it("the state is gone after a failed code exchange", async () => {
+    const login = await startLogin();
+    providers.answer(GOOGLE_TOKEN_URL, oauthError("invalid_grant"), googleTokens());
+    await expectSentBack(await callback(login), "failed");
+    expect(await loginKeys()).toEqual([]);
+
+    // Going back to the same address does not try again: Google's good answer is never asked for.
+    await expectSentBack(await callback(login), "failed");
+    expect(providers.calls).toHaveLength(1);
+    expect(await allKeys()).toEqual([]);
+  });
+
+  it("a failed code exchange stores nothing and leaves an existing record alone", async () => {
+    const failures = (): Response[] => [
+      oauthError("invalid_grant"),
+      new Response("upstream trouble", { status: 500 }),
+      new Response('{"hello":"world"}', { status: 200 }), // a 200 that is not a token answer
+      redirectTo("https://elsewhere.example/token"),
+    ];
+
+    // Nothing was stored before: nothing is stored after.
+    for (const failure of failures()) {
+      const login = await startLogin();
+      providers.answer(GOOGLE_TOKEN_URL, failure);
+      await expectSentBack(await callback(login), "failed");
+      expect(await allKeys()).toEqual([]);
+    }
+
+    // A connection was stored before: it is byte for byte what it was.
+    await (await tokenStore()).put("google", connection());
+    const existing = await env.TOKENS.get("oauth:google");
+    for (const failure of failures()) {
+      const login = await startLogin();
+      providers.answer(GOOGLE_TOKEN_URL, failure);
+      await expectSentBack(await callback(login), "failed");
+      expect(await env.TOKENS.get("oauth:google")).toBe(existing);
+    }
+    // One request per attempt: no retry, and the redirect was not followed.
+    expect(providers.calls.map((c) => c.url)).toEqual(Array(8).fill(GOOGLE_TOKEN_URL));
+  });
+
+  it("a callback with error= consumes the state, stores nothing and shows a fixed message", async () => {
+    const login = await startLogin();
+    const res = await callback(login, {
+      query: { error: "access_denied", error_description: "<script>alert(1)</script>" },
+    });
+    // The fixed word `failed`, which the setup page turns into fixed text. Nothing from the
+    // query string is in the answer.
+    await expectSentBack(res, "failed");
+    for (const [name, value] of res.headers) {
+      expect(value, name).not.toContain("access_denied");
+      expect(value, name).not.toContain("script");
+    }
+    expect(await allKeys()).toEqual([]);
+
+    // An error wins over a code that comes with it, and the state is used up by either.
+    const both = await startLogin();
+    await expectSentBack(await callback(both, { query: { error: "access_denied", code: "the-code" } }), "failed");
+    await expectSentBack(await callback(login), "failed");
+    await expectSentBack(await callback(both), "failed");
+    expect(providers.calls).toEqual([]);
+    expect(await allKeys()).toEqual([]);
+  });
+
+  it("a token response without a refresh token stores nothing", async () => {
+    const login = await startLogin();
+    providers.answer(GOOGLE_TOKEN_URL, googleTokens({ refresh_token: undefined }));
+    providers.answer(GOOGLE_REVOKE_URL, revoked());
+    await expectSentBack(await callback(login), "failed");
+    expect(await allKeys()).toEqual([]);
+
+    // The grant Google just made is given back, so none is left that the hub doesn't hold.
+    const revokes = providers.callsTo(GOOGLE_REVOKE_URL);
+    expect(revokes).toHaveLength(1);
+    expect(Object.fromEntries(revokes[0]!.form)).toEqual({ token: "google-access-one" });
+  });
+
+  it("a scope that differs from the one requested stores nothing (the same scopes in another order are accepted)", async () => {
+    const differing = [
+      `${GOOGLE_SCOPE} https://www.googleapis.com/auth/calendar.readonly`, // more than was asked for
+      "https://www.googleapis.com/auth/calendar.readonly", // something else
+      GOOGLE_SCOPE.toUpperCase(), // scopes are case-sensitive
+      "",
+      undefined, // no scope field at all
+    ];
+    for (const scope of differing) {
+      const login = await startLogin();
+      providers.answer(GOOGLE_TOKEN_URL, googleTokens({ scope }));
+      providers.answer(GOOGLE_REVOKE_URL, revoked());
+      await expectSentBack(await callback(login), "failed", String(scope));
+      expect(await allKeys(), String(scope)).toEqual([]);
+    }
+    // Each of those grants is given back.
+    expect(providers.callsTo(GOOGLE_REVOKE_URL).map((c) => c.form.get("token"))).toEqual(
+      differing.map(() => "google-refresh-one"),
+    );
+
+    // The compare is of sets of space-separated values: order and spacing don't matter.
+    expect(sameScopes("b a", "a b")).toBe(true);
+    expect(sameScopes("  b   a ", "a b")).toBe(true);
+    expect(sameScopes("a b", "a b")).toBe(true);
+    expect(sameScopes("a", "a b")).toBe(false);
+    expect(sameScopes("a b c", "a b")).toBe(false);
+    expect(sameScopes("a c", "a b")).toBe(false);
+    expect(sameScopes("A B", "a b")).toBe(false);
+    expect(sameScopes("", "a b")).toBe(false);
+    expect(sameScopes(undefined, "a b")).toBe(false);
+  });
+
+  it("the callback answers 303 to /setup with no-store and clears the cookie", async () => {
+    // On success.
+    const good = await startLogin();
+    providers.answer(GOOGLE_TOKEN_URL, googleTokens());
+    await expectSentBack(await callback(good), "connected");
+
+    // And on every way of failing, with the same answer each time.
+    const login = await startLogin();
+    await expectSentBack(await callback({ state: "never-issued", cookie: login.cookie }), "failed", "unknown state");
+    await expectSentBack(await get("/oauth/google/callback?code=the-code"), "failed", "no state");
+    await expectSentBack(await get("/oauth/google/callback"), "failed", "nothing at all");
+    await expectSentBack(await callback(login, { query: {} }), "failed", "no code");
+    const broken = { get: () => Promise.reject(new Error("KV is down")) } as unknown as KVNamespace;
+    await expectSentBack(await callback(await startLogin(), { e: hubEnv({ TOKENS: broken }) }), "failed", "KV down");
+    await expectSentBack(await callback(await startLogin(), { e: hubEnv({ TOKEN_ENC_KEY: "not a key" }) }), "failed", "bad key");
+
+    // None of those asked Google for anything.
+    expect(providers.calls).toHaveLength(1);
+  });
+
+  it("a token that can't be stored is revoked", async () => {
+    const e = hubEnv({ TOKENS: kvThatCannotStoreTokens() });
+    const login = await startLogin(e);
+    providers.answer(GOOGLE_TOKEN_URL, googleTokens());
+    providers.answer(GOOGLE_REVOKE_URL, revoked());
+    await expectSentBack(await callback(login, { e }), "failed");
+    expect(await allKeys()).toEqual([]);
+
+    // One revoke, of the refresh token (which ends the whole grant), in the form body: the
+    // token is never part of an address.
+    const revokes = providers.callsTo(GOOGLE_REVOKE_URL);
+    expect(revokes).toHaveLength(1);
+    expect(revokes[0]).toMatchObject({ url: GOOGLE_REVOKE_URL, method: "POST", redirect: "manual" });
+    expect(revokes[0]!.headers.get("Content-Type")).toBe("application/x-www-form-urlencoded");
+    expect(Object.fromEntries(revokes[0]!.form)).toEqual({ token: "google-refresh-one" });
+
+    // A revoke that fails too still ends in the same answer.
+    const again = await startLogin(e);
+    providers.answer(GOOGLE_TOKEN_URL, googleTokens());
+    providers.answer(GOOGLE_REVOKE_URL, new Response("no", { status: 500 }));
+    await expectSentBack(await callback(again, { e }), "failed");
+  });
+
+  it("a state works once at the callback", async () => {
+    const login = await startLogin();
+    providers.answer(GOOGLE_TOKEN_URL, googleTokens(), googleTokens({ access_token: "google-access-again" }));
+    await expectSentBack(await callback(login), "connected");
+    await expectSentBack(await callback(login), "failed");
+    expect(providers.calls).toHaveLength(1);
+    expect((await storedGoogle())!.accessToken).toBe("google-access-one");
+  });
+
+  it("the callback refuses a state with the wrong cookie or the wrong Access email", async () => {
+    const someoneElse = await ownerAccess("someone-else@example.com");
+    const other = await startLogin();
+    const attempts: ((login: Login) => Promise<Response>)[] = [
+      (login) => callback({ state: login.state, cookie: "" }), // no cookie
+      (login) => callback({ state: login.state, cookie: other.cookie }), // another login's cookie
+      (login) => callback(login, { access: someoneElse }),
+    ];
+    for (const attempt of attempts) {
+      const login = await startLogin();
+      await expectSentBack(await attempt(login), "failed");
+      // Refused or not, the state is used up.
+      await expectSentBack(await callback(login), "failed");
+    }
+    expect(providers.calls).toEqual([]);
+    expect(await tokenStore().then((s) => s.read("google"))).toEqual({ status: "none" });
+  });
+
+  it("a Google state is refused at TickTick's callback", async () => {
+    const login = await startLogin();
+    await expectSentBack(await callback(login, { path: "/oauth/ticktick/callback" }), "failed");
+    // The code and the verifier went nowhere, and the state can't be taken to the right path after.
+    await expectSentBack(await callback(login), "failed");
+    expect(providers.calls).toEqual([]);
+    expect(await allKeys()).toEqual([]);
+  });
+
+  it("only a GET runs the callback", async () => {
+    const login = await startLogin();
+    const address = `${HUB}/oauth/google/callback?state=${login.state}&code=the-code`;
+    const others = [
+      new Request(address, { method: "HEAD", headers: { Cookie: login.cookie } }),
+      new Request(address, { method: "POST", headers: { ...JSON_FROM_HUB, Cookie: login.cookie }, body: "{}" }),
+    ];
+    for (const request of others) {
+      const res = await routeRequest(request, hubEnv(), OWNER);
+      expect(res.status, request.method).toBe(405);
+      expect(res.headers.get("Allow"), request.method).toBe("GET");
+    }
+    // Nothing happened: the state is still there, and Google was not called.
+    expect(await loginKeys()).toEqual([`login:${login.state}`]);
+    expect(providers.calls).toEqual([]);
+    for (const path of ["/oauth/evil/callback", "/oauth/google", "/oauth/google/callback/extra", "/oauth/Google/callback"]) {
+      const res = await get(`${path}?state=${login.state}&code=the-code`, hubEnv(), { Cookie: login.cookie });
+      expect(res.status, path).toBe(404);
+    }
+    expect(await loginKeys()).toEqual([`login:${login.state}`]);
+  });
+
+  it("the callback refuses under the local-development skip", async () => {
+    // A hub at https://localhost with every setting in place, and a state made for the
+    // skip's own identity. Only the skip itself stands in the way (G7).
+    const LOCAL = "https://localhost";
+    const devEnv = { ...hubEnv({ HUB_ORIGIN: LOCAL }), USE_FAKES: "true", DEV_SKIP_ACCESS: "true" } as Env;
+    const login = await issueLoginState(env.TOKENS, "google", "dev@localhost", Date.now());
+    providers.answer(GOOGLE_TOKEN_URL, googleTokens());
+
+    const res = await worker.fetch(
+      new Request(`${LOCAL}/oauth/google/callback?state=${login.state}&code=the-code`, {
+        headers: { Cookie: asCookieHeader(login.cookie), "CF-Connecting-IP": "127.0.0.1" },
+      }),
+      devEnv,
+    );
+    await expectSentBack(res, "failed");
+    expect(providers.calls).toEqual([]);
+    expect(await tokenStore().then((s) => s.read("google"))).toEqual({ status: "none" });
+  });
+});
+
+describe("PKCE switch", () => {
+  /** Runs one connection and returns the verifier that went to Google. */
+  async function verifierSent(e: Env, connectBody = "{}", options: CallbackOptions = {}): Promise<{ verifier: string; login: Login }> {
+    const login = await startLogin(e, connectBody);
+    providers.answer(GOOGLE_TOKEN_URL, googleTokens());
+    await callback(login, { e, ...options });
+    return { verifier: providers.calls.at(-1)!.form.get("code_verifier")!, login };
+  }
+
+  it("the correct verifier is sent when the var is unset or holds anything but true", async () => {
+    for (const value of [undefined, "", "false", "TRUE", "True", "1", "yes", " true", "true ", "true\n"]) {
+      const { verifier, login } = await verifierSent(hubEnv({ PKCE_TEST_WRONG_VERIFIER: value }));
+      expect(await s256(verifier), JSON.stringify(value)).toBe(login.challenge);
+    }
+  });
+
+  it("a wrong verifier is sent only when the var is exactly true", async () => {
+    const e = hubEnv({ PKCE_TEST_WRONG_VERIFIER: "true" });
+    const login = await startLogin(e);
+    // Google, if it checks PKCE, refuses the exchange.
+    providers.answer(GOOGLE_TOKEN_URL, oauthError("invalid_grant"));
+    await expectSentBack(await callback(login, { e }), "failed");
+
+    // A verifier of the right form that does not belong to the challenge Google was given.
+    const sent = providers.calls[0]!.form.get("code_verifier")!;
+    expect(sent).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(await s256(sent)).not.toBe(login.challenge);
+    expect(await allKeys()).toEqual([]);
+  });
+
+  it("a request that asks for the test in its body, query or headers still gets the correct verifier", async () => {
+    const asking = '{"PKCE_TEST_WRONG_VERIFIER":"true","pkce_test_wrong_verifier":true}';
+    const { verifier, login } = await verifierSent(hubEnv(), asking, {
+      query: { code: "the-code", PKCE_TEST_WRONG_VERIFIER: "true", pkce_test_wrong_verifier: "true" },
+      headers: { "PKCE-Test-Wrong-Verifier": "true", "X-PKCE-TEST-WRONG-VERIFIER": "true" },
+    });
+    expect(await s256(verifier)).toBe(login.challenge);
+
+    // And as a cookie of that name.
+    const second = await startLogin();
+    providers.answer(GOOGLE_TOKEN_URL, googleTokens());
+    await callback({ state: second.state, cookie: `${second.cookie}; PKCE_TEST_WRONG_VERIFIER=true` });
+    expect(await s256(providers.calls.at(-1)!.form.get("code_verifier")!)).toBe(second.challenge);
   });
 });
 
