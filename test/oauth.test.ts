@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
+import { TokenStore, importKey, type StoredToken } from "../src/crypto/tokens";
+import type { Env } from "../src/env";
+import { googleAccessToken, googleSignInUrl } from "../src/oauth/google";
 import { providerFetch } from "../src/oauth/provider-fetch";
 import { clearLoginCookie, consumeLoginState, issueLoginState } from "../src/oauth/state";
+import { NotConfiguredError, NotConnectedError } from "../src/sources/types";
 import {
+  GOOGLE_SCOPE,
   GOOGLE_TOKEN_URL,
+  googleRefreshed,
   mockProviders,
   neverAnswers,
   oauthError,
@@ -46,6 +52,49 @@ const fromBase64url = (text: string): Uint8Array =>
 /** The PKCE S256 challenge for a verifier, worked out here and not by the code under test. */
 const s256 = async (verifier: string): Promise<string> =>
   base64url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
+
+/** The deployed Worker's settings as tests see them: the real test KV, the test values, fake data off. */
+const hubEnv = (over: Partial<Env> = {}): Env =>
+  ({
+    ASSETS: env.ASSETS,
+    TOKENS: env.TOKENS,
+    TIME_ZONE: "America/Indiana/Indianapolis",
+    USE_FAKES: "false",
+    TOKEN_ENC_KEY: env.TOKEN_ENC_KEY,
+    GOOGLE_CLIENT_ID: env.GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET: env.GOOGLE_CLIENT_SECRET,
+    HUB_ORIGIN: env.HUB_ORIGIN,
+    ...over,
+  }) as Env;
+
+/** The token store under the test key, for putting records in place and reading them back. */
+const tokenStore = async (): Promise<TokenStore> => new TokenStore(env.TOKENS, await importKey(env.TOKEN_ENC_KEY));
+
+const ONE_DAY = 86_400_000;
+
+/** A stored Google connection, made a day before T0, whose access token is good for another hour. */
+const connection = (over: Partial<StoredToken> = {}): StoredToken => ({
+  accessToken: "google-access-one",
+  refreshToken: "google-refresh-one",
+  expiresAt: T0 + 3_600_000,
+  scope: GOOGLE_SCOPE,
+  connectedAt: T0 - ONE_DAY,
+  ...over,
+});
+
+/** KV that also notes which keys were read. */
+function watchedKv(): { kv: KVNamespace; reads: string[] } {
+  const reads: string[] = [];
+  const kv = {
+    get: (key: string) => {
+      reads.push(key);
+      return env.TOKENS.get(key);
+    },
+    put: (key: string, value: string, options?: KVNamespacePutOptions) => env.TOKENS.put(key, value, options),
+    delete: (key: string) => env.TOKENS.delete(key),
+  } as unknown as KVNamespace;
+  return { kv, reads };
+}
 
 describe("state", () => {
   const issue = (now = T0) => issueLoginState(env.TOKENS, "google", OWNER_EMAIL, now);
@@ -190,6 +239,223 @@ describe("state", () => {
       "Secure",
       "__Host-hub_login=",
     ]);
+  });
+});
+
+describe("Sign-in address", () => {
+  it("the sign-in address never asks for include_granted_scopes", () => {
+    const address = new URL(
+      googleSignInUrl({
+        clientId: "test-google-client-id",
+        redirectUri: "https://hub.example.com/oauth/google/callback",
+        state: "the-state",
+        challenge: "the-challenge",
+      }),
+    );
+    expect(address.origin + address.pathname).toBe("https://accounts.google.com/o/oauth2/v2/auth");
+    // Exactly these: the one scope, offline access with consent (so a refresh token comes
+    // back, G5), the state and the PKCE challenge. Nothing that widens the grant.
+    expect(Object.fromEntries(address.searchParams)).toEqual({
+      client_id: "test-google-client-id",
+      redirect_uri: "https://hub.example.com/oauth/google/callback",
+      response_type: "code",
+      scope: "https://www.googleapis.com/auth/calendar.events.readonly",
+      access_type: "offline",
+      prompt: "consent",
+      state: "the-state",
+      code_challenge: "the-challenge",
+      code_challenge_method: "S256",
+    });
+    expect(address.href).not.toContain("include_granted_scopes");
+  });
+});
+
+describe("Refresh", () => {
+  /** What is stored for Google now, or null. */
+  const stored = async () => (await tokenStore()).get("google");
+  const put = async (token: StoredToken) => (await tokenStore()).put("google", token);
+
+  it("uses a token that has not expired as it is", async () => {
+    await put(connection());
+    expect(await googleAccessToken(hubEnv(), T0)).toBe("google-access-one");
+    expect(providers.calls).toEqual([]);
+  });
+
+  it("an expired access token is refreshed and the refresh token is kept", async () => {
+    await put(connection({ expiresAt: T0 - 1 }));
+    providers.answer(GOOGLE_TOKEN_URL, googleRefreshed());
+
+    expect(await googleAccessToken(hubEnv(), T0)).toBe("google-access-two");
+
+    // One request, to Google's token address, as its docs describe a refresh.
+    expect(providers.calls).toHaveLength(1);
+    const [call] = providers.calls;
+    expect(call).toMatchObject({ url: GOOGLE_TOKEN_URL, method: "POST", redirect: "manual" });
+    expect(call!.headers.get("Content-Type")).toBe("application/x-www-form-urlencoded");
+    expect(Object.fromEntries(call!.form)).toEqual({
+      client_id: "test-google-client-id",
+      client_secret: "test-google-client-secret",
+      grant_type: "refresh_token",
+      refresh_token: "google-refresh-one",
+    });
+
+    // The new access token and its expiry (3920 seconds on) are saved. The rest is as it was.
+    expect(await stored()).toEqual({
+      accessToken: "google-access-two",
+      refreshToken: "google-refresh-one",
+      expiresAt: T0 + 3_920_000,
+      scope: GOOGLE_SCOPE,
+      connectedAt: T0 - ONE_DAY,
+    });
+  });
+
+  it("a token within 60 seconds of expiry is refreshed first", async () => {
+    await put(connection({ expiresAt: T0 + 60_000 }));
+    expect(await googleAccessToken(hubEnv(), T0)).toBe("google-access-one");
+    expect(providers.calls).toEqual([]);
+
+    await put(connection({ expiresAt: T0 + 59_999 }));
+    providers.answer(GOOGLE_TOKEN_URL, googleRefreshed());
+    expect(await googleAccessToken(hubEnv(), T0)).toBe("google-access-two");
+    expect(providers.calls).toHaveLength(1);
+  });
+
+  it("a token with no stored expiry is refreshed first", async () => {
+    await put(connection({ expiresAt: undefined }));
+    // Google's answer gives no lifetime this time, so none is stored: no length is assumed.
+    providers.answer(GOOGLE_TOKEN_URL, googleRefreshed({ expires_in: undefined }));
+    expect(await googleAccessToken(hubEnv(), T0)).toBe("google-access-two");
+    expect((await stored())!.expiresAt).toBeUndefined();
+
+    // So the next use refreshes again.
+    providers.answer(GOOGLE_TOKEN_URL, googleRefreshed({ access_token: "google-access-three" }));
+    expect(await googleAccessToken(hubEnv(), T0)).toBe("google-access-three");
+    expect(providers.calls).toHaveLength(2);
+  });
+
+  it("a new refresh token is saved", async () => {
+    await put(connection({ expiresAt: T0 - 1 }));
+    providers.answer(GOOGLE_TOKEN_URL, googleRefreshed({ refresh_token: "google-refresh-two" }));
+    await googleAccessToken(hubEnv(), T0);
+    expect(await stored()).toMatchObject({
+      accessToken: "google-access-two",
+      refreshToken: "google-refresh-two",
+      connectedAt: T0 - ONE_DAY,
+    });
+  });
+
+  it("invalid_grant re-reads once and deletes only the same connection, then answers not_connected", async () => {
+    await put(connection({ expiresAt: T0 - 1 }));
+    providers.answer(GOOGLE_TOKEN_URL, oauthError("invalid_grant"));
+    const { kv, reads } = watchedKv();
+
+    // NotConnectedError("google") is what the router answers `not_connected` for.
+    const refused = await googleAccessToken(hubEnv({ TOKENS: kv }), T0).catch((e) => e);
+    expect(refused).toBeInstanceOf(NotConnectedError);
+    expect(refused.provider).toBe("google");
+
+    // Read once to use it, once more after the refusal, and then deleted.
+    expect(reads).toEqual(["oauth:google", "oauth:google"]);
+    expect(await env.TOKENS.get("oauth:google")).toBeNull();
+    expect(providers.calls).toHaveLength(1);
+  });
+
+  it("invalid_grant on an old record does not delete a newer one (the newer one is tried once)", async () => {
+    const newer = connection({ accessToken: "google-access-newer", refreshToken: "google-refresh-newer", connectedAt: T0 });
+    /** The owner reconnects while the old record's refresh is on its way. */
+    const reconnectDuringRefresh = (record: StoredToken) => async () => {
+      await put(record);
+      return oauthError("invalid_grant");
+    };
+
+    // The newer connection's token is good: it is used, with no further call.
+    await put(connection({ expiresAt: T0 - 1 }));
+    providers.answer(GOOGLE_TOKEN_URL, reconnectDuringRefresh(newer));
+    expect(await googleAccessToken(hubEnv(), T0)).toBe("google-access-newer");
+    expect(await stored()).toEqual(newer);
+    expect(providers.calls).toHaveLength(1);
+
+    // The newer connection's token has expired too: it is refreshed, with its own refresh token.
+    const newerExpired = { ...newer, expiresAt: T0 - 1 };
+    await put(connection({ expiresAt: T0 - 1 }));
+    providers.answer(GOOGLE_TOKEN_URL, reconnectDuringRefresh(newerExpired), googleRefreshed());
+    expect(await googleAccessToken(hubEnv(), T0)).toBe("google-access-two");
+    expect(providers.calls.at(-1)!.form.get("refresh_token")).toBe("google-refresh-newer");
+    expect(await stored()).toMatchObject({ accessToken: "google-access-two", connectedAt: T0 });
+    expect(providers.calls).toHaveLength(3);
+
+    // The newer connection is refused as well: it is tried once and never deleted. A plain
+    // failure, not `not_connected`; the next request starts from that record.
+    await put(connection({ expiresAt: T0 - 1 }));
+    providers.answer(GOOGLE_TOKEN_URL, reconnectDuringRefresh(newerExpired), oauthError("invalid_grant"));
+    const failed = await googleAccessToken(hubEnv(), T0).catch((e) => e);
+    expect(failed).toMatchObject({ name: "ProviderError", kind: "refused" });
+    expect(await stored()).toEqual(newerExpired);
+    expect(providers.calls).toHaveLength(5);
+  });
+
+  it("two refreshes at once both succeed", async () => {
+    await put(connection({ expiresAt: T0 - 1 }));
+    providers.answer(GOOGLE_TOKEN_URL, googleRefreshed(), googleRefreshed({ access_token: "google-access-three" }));
+
+    const both = await Promise.all([googleAccessToken(hubEnv(), T0), googleAccessToken(hubEnv(), T0)]);
+    expect(both.sort()).toEqual(["google-access-three", "google-access-two"]);
+
+    // The last one saved wins, and the refresh token is still there for next time.
+    const after = await stored();
+    expect(both).toContain(after!.accessToken);
+    expect(after).toMatchObject({ refreshToken: "google-refresh-one", connectedAt: T0 - ONE_DAY });
+  });
+
+  it("a refresh that fails some other way leaves the record alone", async () => {
+    const expired = connection({ expiresAt: T0 - 1 });
+    const failures = [
+      { answer: new Response("upstream trouble", { status: 500 }), kind: "refused" },
+      { answer: oauthError("invalid_client", 401), kind: "refused" },
+      { answer: oauthError("invalid_request", 400), kind: "refused" },
+      // A 200 that is not a token answer.
+      { answer: new Response('{"hello":"world"}', { status: 200 }), kind: "refused" },
+      { answer: redirectTo("https://elsewhere.example/token"), kind: "redirect" },
+    ];
+    for (const { answer, kind } of failures) {
+      await put(expired);
+      providers.answer(GOOGLE_TOKEN_URL, answer);
+      const failed = await googleAccessToken(hubEnv(), T0).catch((e) => e);
+      expect(failed, kind).toMatchObject({ name: "ProviderError", kind });
+      expect(await stored()).toEqual(expired);
+    }
+    // One request each: nothing is retried, and no redirect is followed.
+    expect(providers.calls.map((c) => c.url)).toEqual(failures.map(() => GOOGLE_TOKEN_URL));
+  });
+
+  it("answers not_connected when there is nothing usable to refresh", async () => {
+    // Nothing stored.
+    await expect(googleAccessToken(hubEnv(), T0)).rejects.toBeInstanceOf(NotConnectedError);
+    // A record this key can't read (a key change, G2). It is left for Disconnect to delete.
+    await env.TOKENS.put("oauth:google", "v1.garbage.garbage");
+    await expect(googleAccessToken(hubEnv(), T0)).rejects.toBeInstanceOf(NotConnectedError);
+    expect(await env.TOKENS.get("oauth:google")).toBe("v1.garbage.garbage");
+    // An expired token with no refresh token.
+    await put(connection({ expiresAt: T0 - 1, refreshToken: undefined }));
+    await expect(googleAccessToken(hubEnv(), T0)).rejects.toBeInstanceOf(NotConnectedError);
+
+    expect(providers.calls).toEqual([]);
+  });
+
+  it("answers not_configured, without calling Google, when the key or a client setting is missing or bad", async () => {
+    await put(connection({ expiresAt: T0 - 1 }));
+    const broken: Partial<Env>[] = [
+      { TOKEN_ENC_KEY: undefined },
+      { TOKEN_ENC_KEY: "not a key" },
+      { GOOGLE_CLIENT_ID: undefined },
+      { GOOGLE_CLIENT_ID: "  " },
+      { GOOGLE_CLIENT_SECRET: undefined },
+      { GOOGLE_CLIENT_SECRET: "" },
+    ];
+    for (const over of broken) {
+      await expect(googleAccessToken(hubEnv(over), T0), JSON.stringify(over)).rejects.toBeInstanceOf(NotConfiguredError);
+    }
+    expect(providers.calls).toEqual([]);
   });
 });
 

@@ -62,3 +62,10 @@ export class NotConnectedError extends Error {
     super(`${provider}_not_connected`);
   }
 }
+
+/** A setting the call needs is missing or badly formed: the page shows "not set up yet". */
+export class NotConfiguredError extends Error {
+  constructor() {
+    super("not_configured");
+  }
+}

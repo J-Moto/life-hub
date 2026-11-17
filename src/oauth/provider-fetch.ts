@@ -10,8 +10,11 @@
 
 export const PROVIDER_TIMEOUT_MS = 10_000;
 
-/** Why a provider call produced nothing usable. */
-export type ProviderFailure = "redirect" | "timeout" | "network";
+/**
+ * Why a provider call produced nothing usable. The first three come from `providerFetch`.
+ * `refused` is for its callers: the provider answered, but not with what was asked for.
+ */
+export type ProviderFailure = "redirect" | "timeout" | "network" | "refused";
 
 /** Carries a fixed word only: never an address, a body or a token. */
 export class ProviderError extends Error {
