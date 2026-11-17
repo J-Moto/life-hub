@@ -31,6 +31,10 @@ export interface Env {
   WORK_BLOCK_TITLE?: string;
   TICKTICK_HABIT_IDS?: string; // comma-separated. Still read today; HABITS replaces it in step 7.
 
+  // Temporary (steps 2 and 4; step 10 removes it). Unset at all other times, never in wrangler.jsonc.
+  // Only when exactly "true" does the callback send a wrong PKCE verifier on purpose.
+  PKCE_TEST_WRONG_VERIFIER?: string;
+
   // --- Local dev only (.dev.vars) ---
   // Lets requests from localhost skip Access. Ignored on any other host.
   DEV_SKIP_ACCESS?: string;
