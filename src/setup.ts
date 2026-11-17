@@ -60,6 +60,73 @@ async function loginSettings(env: Env, requestOrigin: string): Promise<LoginSett
   }
 }
 
+/** What /setup shows for one provider. `stored` is true for any record, readable or not. */
+async function connectionState(env: Env, provider: Provider): Promise<{ connected: boolean; stored: boolean }> {
+  if (!(await tokenRecordExists(env.TOKENS, provider))) return { connected: false, stored: false };
+  try {
+    const store = new TokenStore(env.TOKENS, await importKey(env.TOKEN_ENC_KEY));
+    return { connected: (await store.get(provider)) !== null, stored: true };
+  } catch {
+    // The key is missing or bad: the record is there but can't be read.
+    return { connected: false, stored: true };
+  }
+}
+
+const hiddenIf = (hide: boolean): string => (hide ? " hidden" : "");
+
+/**
+ * The setup page. It says "connected" or "not connected" for each service and nothing else
+ * about the tokens (G1). Built from fixed text only: nothing from the request goes into it.
+ * The result word in the address (`?result=…`) is read by the static script, `setup.js`.
+ *
+ * Buttons: Connect is offered only while not connected, so a second connect can't leave an
+ * older grant live at the provider. Disconnect is offered whenever a record is stored, even
+ * one that can't be decrypted, so the G2 key-change steps can delete it.
+ */
+export async function setupPage(env: Env, access: VerifiedAccess): Promise<Response> {
+  const [google, ticktick] = await Promise.all([connectionState(env, "google"), connectionState(env, "ticktick")]);
+  const status = (connected: boolean): string => (connected ? "connected" : "not connected");
+  // Real connections are made on the deployed hub only (G7): no Connect button in local dev.
+  const connectButton = access.devBypass
+    ? ""
+    : `<button type="button" data-action="connect"${hiddenIf(google.connected)}>Connect</button>\n    `;
+  const localNote = access.devBypass ? "\n  <p>Connections are made on the deployed hub.</p>" : "";
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Life Hub setup</title>
+<link rel="stylesheet" href="/app.css">
+<script type="module" src="/setup.js"></script>
+</head>
+<body>
+<main>
+  <h1>Connections</h1>
+  <p id="signin" hidden><a href="/setup">Sign in again</a></p>
+  <p id="note" role="status"></p>${localNote}
+  <section data-provider="google">
+    <h2>Google Calendar</h2>
+    <p class="status">${status(google.connected)}</p>
+    <p>
+    ${connectButton}<button type="button" data-action="disconnect"${hiddenIf(!google.stored)}>Disconnect</button>
+    </p>
+  </section>
+  <section data-provider="ticktick">
+    <h2>TickTick</h2>
+    <p class="status">${status(ticktick.connected)}</p>
+  </section>
+  <p><a href="/">Back to the hub</a></p>
+</main>
+</body>
+</html>
+`;
+  return new Response(html, {
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+  });
+}
+
 /**
  * Starts a connection: answers with the provider's sign-in address, which the page goes to.
  * The router has already done the F5 checks (POST, same origin, JSON body).

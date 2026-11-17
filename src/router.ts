@@ -20,7 +20,7 @@ import {
 } from "./api";
 import type { Provider } from "./crypto/tokens";
 import { readJson } from "./domain/input";
-import { connect, disconnect, oauthCallback } from "./setup";
+import { connect, disconnect, oauthCallback, setupPage } from "./setup";
 import { NotConnectedError, type TaskReader, type TaskWriter, type TaskWrites } from "./sources/types";
 
 type WriteRoute = { kind: "complete"; taskId: string } | { kind: "next" } | { kind: "restart" };
@@ -170,6 +170,9 @@ async function routeSetup(
   env: Env,
   access: VerifiedAccess,
 ): Promise<Response | null> {
+  if (pathname === "/setup") {
+    return request.method === "GET" ? setupPage(env, access) : methodNotAllowed("GET");
+  }
   if (!pathname.startsWith("/setup/") && !pathname.startsWith("/oauth/")) return null;
 
   const action = pathname.match(SETUP_ACTION_ROUTE);

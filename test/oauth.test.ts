@@ -1127,6 +1127,92 @@ describe("Disconnect", () => {
   });
 });
 
+describe("Setup page", () => {
+  /** One provider's part of the page. */
+  function part(html: string, provider: string) {
+    const section = html.match(new RegExp(`<section data-provider="${provider}">[\\s\\S]*?</section>`))?.[0] ?? "";
+    const button = (action: string) => section.match(new RegExp(`<button [^>]*data-action="${action}"[^>]*>`))?.[0];
+    return {
+      status: section.match(/<p class="status">([^<]*)<\/p>/)?.[1],
+      /** "shown", "hidden", or "absent" when the page has no such button. */
+      connect: button("connect") ? (/\shidden[\s>]/.test(button("connect")!) ? "hidden" : "shown") : "absent",
+      disconnect: button("disconnect") ? (/\shidden[\s>]/.test(button("disconnect")!) ? "hidden" : "shown") : "absent",
+    };
+  }
+
+  async function page(e: Env = hubEnv(), path = "/setup"): Promise<string> {
+    const res = await get(path, e);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    return res.text();
+  }
+
+  it("shows both services as not connected, with no inline script, and ignores the query string", async () => {
+    const html = await page();
+    expect(part(html, "google")).toEqual({ status: "not connected", connect: "shown", disconnect: "hidden" });
+    // TickTick has no buttons until step 4.
+    expect(part(html, "ticktick")).toEqual({ status: "not connected", connect: "absent", disconnect: "absent" });
+
+    // The CSP allows no inline script or style: the one script is the static file.
+    expect(html.match(/<script[^>]*>[^<]*<\/script>/g)).toEqual(['<script type="module" src="/setup.js"></script>']);
+    expect(html).not.toMatch(/\son[a-z]+=/i);
+    expect(html).not.toMatch(/\sstyle=/i);
+    expect(html).not.toContain("<style");
+
+    // Nothing from the address reaches the page: the result word is the script's to read.
+    expect(await page(hubEnv(), "/setup?result=%3Cscript%3Ealert(1)%3C/script%3E&error=nope")).toBe(html);
+    expect(await page(hubEnv(), "/setup?result=connected")).toBe(html);
+  });
+
+  it("shows Google as connected, and nothing else about the token", async () => {
+    await (await tokenStore()).put("google", connection());
+    const html = await page();
+    // Connected: Disconnect is the only thing offered, so a second connect can't leave an
+    // older grant live at Google.
+    expect(part(html, "google")).toEqual({ status: "connected", connect: "hidden", disconnect: "shown" });
+    expect(part(html, "ticktick").status).toBe("not connected");
+    for (const secret of ["google-access-one", "google-refresh-one", "calendar.events.readonly", "oauth:google", "v1."]) {
+      expect(html, secret).not.toContain(secret);
+    }
+  });
+
+  it("shows a record that can't be decrypted as not connected, with Disconnect offered", async () => {
+    // G2: after a key change the old record is there but unreadable. Disconnect deletes it.
+    await env.TOKENS.put("oauth:google", "v1.garbage.garbage");
+    expect(part(await page(), "google")).toEqual({ status: "not connected", connect: "shown", disconnect: "shown" });
+
+    // The same when the record is good but the key is missing or bad: never a 500.
+    await (await tokenStore()).put("google", connection());
+    for (const TOKEN_ENC_KEY of [undefined, "not a key"]) {
+      const html = await page(hubEnv({ TOKEN_ENC_KEY }));
+      expect(part(html, "google"), String(TOKEN_ENC_KEY)).toEqual({ status: "not connected", connect: "shown", disconnect: "shown" });
+    }
+  });
+
+  it("offers no Connect under the local-development skip", async () => {
+    const res = await worker.fetch(
+      new Request("http://localhost:8787/setup", { headers: { "CF-Connecting-IP": "127.0.0.1" } }),
+      { ...hubEnv(), USE_FAKES: "true", DEV_SKIP_ACCESS: "true" } as Env,
+    );
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // What `npm run dev` shows: both not connected, and where connections are made (G7).
+    expect(part(html, "google")).toEqual({ status: "not connected", connect: "absent", disconnect: "hidden" });
+    expect(part(html, "ticktick").status).toBe("not connected");
+    expect(html).toContain("Connections are made on the deployed hub.");
+    expect(await page()).not.toContain("Connections are made on the deployed hub.");
+  });
+
+  it("is a GET only", async () => {
+    const viaPost = await post("/setup");
+    expect(viaPost.status).toBe(405);
+    expect(viaPost.headers.get("Allow")).toBe("GET");
+    const viaHead = await routeRequest(new Request(`${HUB}/setup`, { method: "HEAD" }), hubEnv(), OWNER);
+    expect(viaHead.status).toBe(405);
+  });
+});
+
 describe("Provider calls", () => {
   const send = () =>
     providerFetch("test.call", GOOGLE_TOKEN_URL, {

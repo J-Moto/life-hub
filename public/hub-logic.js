@@ -68,6 +68,69 @@ export function applyResult(state, result, now) {
   }
 }
 
+// The setup page (docs/design/v1.md, G1). Every text it shows is one of the fixed strings
+// below: nothing from the address or from an answer is ever put into the page.
+
+const SETUP_RESULTS = new Map([
+  ["connected", "Connected."],
+  ["failed", "The connection didn't complete. Try again."],
+]);
+
+/**
+ * The fixed text for the word the OAuth callback sends back in `/setup?result=…`.
+ * `search` is `location.search`. An unknown word shows nothing.
+ */
+export function setupResultText(search) {
+  return SETUP_RESULTS.get(new URLSearchParams(search).get("result") ?? "") ?? null;
+}
+
+/** Where connect may send the browser: only a provider's own sign-in address. */
+const SIGN_IN = new Map([["google", "https://accounts.google.com/o/oauth2/v2/auth"]]);
+const PROVIDER_LABELS = new Map([
+  ["google", "Google"],
+  ["ticktick", "TickTick"],
+]);
+
+/** The sign-in address in a connect answer, if it is that provider's own; otherwise null. */
+export function signInAddress(provider, body) {
+  const expected = SIGN_IN.get(provider);
+  if (!expected || !body || typeof body.url !== "string") return null;
+  try {
+    const url = new URL(body.url);
+    return url.origin + url.pathname === expected ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What the setup page does with the answer to connect or disconnect. `result` is what
+ * `classify` returned. Gives one of: `{ signIn: true }`, `{ goTo }` (leave for the
+ * provider's sign-in address), `{ note }`, or `{ disconnected: true, note }`.
+ */
+export function setupOutcome(action, provider, result) {
+  if (result.kind === "signin") return { signIn: true };
+
+  if (action === "connect") {
+    const goTo = result.kind === "ok" ? signInAddress(provider, result.body) : null;
+    if (goTo) return { goTo };
+    if (result.kind === "not_configured") return { note: "Not set up yet." };
+    if (result.kind === "not_enabled") return { note: "Connections are made on the deployed hub." };
+    return { note: "Couldn't start the connection. Try again." };
+  }
+
+  if (result.kind !== "ok") return { note: "Couldn't disconnect. Try again." };
+  // The token could not be revoked (the call failed, or the record could not be read).
+  if (result.body.removeAccess) {
+    const name = PROVIDER_LABELS.get(provider) ?? "provider";
+    return {
+      disconnected: true,
+      note: `Disconnected here, but the hub's access could not be revoked. Remove it on your ${name} account page.`,
+    };
+  }
+  return { disconnected: true, note: "Disconnected." };
+}
+
 /** "updated 9:41", in the browser's own time. */
 export function formatUpdated(date) {
   return `updated ${date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;

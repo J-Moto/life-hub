@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { applyResult, classify, emptySection, formatUpdated, writeOutcome } from "../public/hub-logic.js";
+import {
+  applyResult,
+  classify,
+  emptySection,
+  formatUpdated,
+  setupOutcome,
+  setupResultText,
+  signInAddress,
+  writeOutcome,
+} from "../public/hub-logic.js";
 
 // What the page does with each answer from the Worker (docs/design/v1.md, section 3,
 // "What each answer means to the page"). The logic is pure: no page, no fetch.
@@ -153,5 +162,90 @@ describe("applyResult: what a section shows after a load", () => {
 describe("formatUpdated", () => {
   it("shows the time of the last good load", () => {
     expect(formatUpdated(new Date(2026, 10, 16, 9, 41))).toMatch(/^updated .*9:41/);
+  });
+});
+
+// The setup page (docs/design/v1.md, G1 and the step 2 callback contract).
+describe("setup page", () => {
+  const GOOGLE_SIGN_IN = "https://accounts.google.com/o/oauth2/v2/auth";
+
+  it("turns the callback's result word into fixed text", () => {
+    expect(setupResultText("?result=connected")).toBe("Connected.");
+    expect(setupResultText("?result=failed")).toBe("The connection didn't complete. Try again.");
+  });
+
+  it("shows nothing for an unknown result word, and never the word itself", () => {
+    for (const search of ["", "?", "?result=", "?result=CONNECTED", "?result=<script>alert(1)</script>", "?other=connected", "?result=toString"]) {
+      expect(setupResultText(search), search).toBeNull();
+    }
+  });
+
+  it("follows a connect answer only to the provider's own sign-in address", () => {
+    const go = `${GOOGLE_SIGN_IN}?client_id=abc&state=xyz`;
+    expect(signInAddress("google", { url: go })).toBe(go);
+
+    const elsewhere = [
+      "https://accounts.google.com.evil.example/o/oauth2/v2/auth?state=xyz",
+      "https://evil.example/o/oauth2/v2/auth",
+      "http://accounts.google.com/o/oauth2/v2/auth",
+      "https://accounts.google.com/somewhere/else",
+      "https://accounts.google.com@evil.example/o/oauth2/v2/auth",
+      "javascript:alert(1)",
+      "/setup",
+      "",
+    ];
+    for (const url of elsewhere) expect(signInAddress("google", { url }), url).toBeNull();
+    for (const body of [null, {}, { url: 42 }, { url: null }]) expect(signInAddress("google", body)).toBeNull();
+    // A provider the page doesn't know has no sign-in address.
+    expect(signInAddress("ticktick", { url: go })).toBeNull();
+    expect(signInAddress("toString", { url: go })).toBeNull();
+  });
+
+  const answered = (status: number, body: unknown) => classify({ status, type: "basic", body });
+
+  it("connect: goes to the sign-in address, or says why not", () => {
+    const go = `${GOOGLE_SIGN_IN}?state=xyz`;
+    expect(setupOutcome("connect", "google", answered(200, { url: go }))).toEqual({ goTo: go });
+    // An answer that names some other address is not followed.
+    expect(setupOutcome("connect", "google", answered(200, { url: "https://evil.example/" }))).toEqual({
+      note: "Couldn't start the connection. Try again.",
+    });
+    expect(setupOutcome("connect", "google", answered(503, { error: "not_configured" }))).toEqual({
+      note: "Not set up yet.",
+    });
+    expect(setupOutcome("connect", "google", answered(503, { error: "not_enabled" }))).toEqual({
+      note: "Connections are made on the deployed hub.",
+    });
+    expect(setupOutcome("connect", "google", answered(500, { error: "internal" }))).toEqual({
+      note: "Couldn't start the connection. Try again.",
+    });
+    expect(setupOutcome("connect", "google", classify(null))).toEqual({
+      note: "Couldn't start the connection. Try again.",
+    });
+  });
+
+  it("disconnect: says it is done, and shows the remove-access note when the token wasn't revoked", () => {
+    expect(setupOutcome("disconnect", "google", answered(200, { ok: true, removeAccess: false }))).toEqual({
+      disconnected: true,
+      note: "Disconnected.",
+    });
+    expect(setupOutcome("disconnect", "google", answered(200, { ok: true, removeAccess: true }))).toEqual({
+      disconnected: true,
+      note: "Disconnected here, but the hub's access could not be revoked. Remove it on your Google account page.",
+    });
+    expect(setupOutcome("disconnect", "google", answered(500, { error: "internal" }))).toEqual({
+      note: "Couldn't disconnect. Try again.",
+    });
+  });
+
+  it("an ended sign-in shows the page-level link, not a note", () => {
+    for (const action of ["connect", "disconnect"]) {
+      expect(setupOutcome(action, "google", answered(401, null))).toEqual({ signIn: true });
+      expect(setupOutcome(action, "google", classify({ status: 0, type: "opaqueredirect", body: null }))).toEqual({ signIn: true });
+    }
+    // A 403 cross_site is a failure: signing in again would not fix it.
+    expect(setupOutcome("disconnect", "google", answered(403, { error: "cross_site" }))).toEqual({
+      note: "Couldn't disconnect. Try again.",
+    });
   });
 });
