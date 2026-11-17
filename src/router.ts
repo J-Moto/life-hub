@@ -18,7 +18,9 @@ import {
   restart,
   type Config,
 } from "./api";
+import type { Provider } from "./crypto/tokens";
 import { readJson } from "./domain/input";
+import { connect } from "./setup";
 import { NotConnectedError, type TaskReader, type TaskWriter, type TaskWrites } from "./sources/types";
 
 type WriteRoute = { kind: "complete"; taskId: string } | { kind: "next" } | { kind: "restart" };
@@ -149,6 +151,36 @@ async function routeApi(
   return json({ error: "not_found" }, 404);
 }
 
+// `:provider` is one of the two literal names. Nothing is decoded, so an encoded or
+// differently cased name is simply not a route.
+const CONNECT_ROUTE = /^\/setup\/connect\/(ticktick|google)$/;
+
+const methodNotAllowed = (allow: string): Response =>
+  new Response("Method not allowed", { status: 405, headers: { Allow: allow } });
+
+/**
+ * The connection routes (`/setup*` and `/oauth/*`), or null for any other path. A path under
+ * them that is not a route is a 404 here: it never falls through to the static files.
+ */
+async function routeSetup(
+  request: Request,
+  pathname: string,
+  body: Record<string, unknown> | null,
+  env: Env,
+  access: VerifiedAccess,
+): Promise<Response | null> {
+  if (!pathname.startsWith("/setup/") && !pathname.startsWith("/oauth/")) return null;
+
+  const connectTo = pathname.match(CONNECT_ROUTE);
+  if (connectTo) {
+    // `body` is set only for a POST that passed the same-origin and JSON checks below.
+    if (!body) return methodNotAllowed("POST");
+    return connect(request, env, access, connectTo[1] as Provider);
+  }
+
+  return json({ error: "not_found" }, 404);
+}
+
 /**
  * Everything that happens after the Access check. It does not verify the Access token
  * itself, so it can't be called without the result of a check that passed: `access` is
@@ -174,6 +206,9 @@ export async function routeRequest(request: Request, env: Env, access: VerifiedA
   }
 
   if (url.pathname.startsWith("/api/")) return routeApi(method, url.pathname, body, env);
+
+  const setup = await routeSetup(request, url.pathname, body, env, access);
+  if (setup) return setup;
 
   if (!readOnly) return new Response("Method not allowed", { status: 405 });
   return env.ASSETS.fetch(request);

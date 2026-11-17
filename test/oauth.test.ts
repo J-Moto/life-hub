@@ -1,11 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
+import worker from "../src/index";
+import type { VerifiedAccess } from "../src/auth/access";
 import { TokenStore, importKey, type StoredToken } from "../src/crypto/tokens";
 import type { Env } from "../src/env";
 import { googleAccessToken, googleSignInUrl } from "../src/oauth/google";
 import { providerFetch } from "../src/oauth/provider-fetch";
 import { clearLoginCookie, consumeLoginState, issueLoginState } from "../src/oauth/state";
+import { routeRequest } from "../src/router";
 import { NotConfiguredError, NotConnectedError } from "../src/sources/types";
+import { ownerAccess } from "./helpers/access";
 import {
   GOOGLE_SCOPE,
   GOOGLE_TOKEN_URL,
@@ -20,10 +24,18 @@ import {
 // The Google connection (docs/design/v1.md, step 2): the login state, the callback contract,
 // refresh, disconnect, and how providers are called. Google itself is mocked.
 
+const HUB = "https://hub.example.com";
 const OWNER_EMAIL = "me@example.com";
 /** A fixed "now" for the functions that take one. */
 const T0 = 1_800_000_000_000;
 const TEN_MINUTES = 600_000;
+
+/** A passed Access check for the owner (me@example.com), made by `verifyAccess`. */
+let OWNER: VerifiedAccess;
+
+beforeAll(async () => {
+  OWNER = await ownerAccess();
+});
 
 let providers: MockedProviders;
 
@@ -95,6 +107,26 @@ function watchedKv(): { kv: KVNamespace; reads: string[] } {
   } as unknown as KVNamespace;
   return { kv, reads };
 }
+
+const JSON_FROM_HUB = { Origin: HUB, "Content-Type": "application/json" };
+
+/** A POST as the setup page sends it (its own origin, a JSON object), past the Access check as the owner. */
+function post(
+  path: string,
+  e: Env = hubEnv(),
+  init: { headers?: Record<string, string>; body?: string } = {},
+): Promise<Response> {
+  const request = new Request(`${HUB}${path}`, {
+    method: "POST",
+    headers: init.headers ?? JSON_FROM_HUB,
+    body: init.body ?? "{}",
+  });
+  return routeRequest(request, e, OWNER);
+}
+
+/** A GET past the Access check as the owner. */
+const get = (path: string, e: Env = hubEnv(), headers: Record<string, string> = {}): Promise<Response> =>
+  routeRequest(new Request(`${HUB}${path}`, { headers }), e, OWNER);
 
 describe("state", () => {
   const issue = (now = T0) => issueLoginState(env.TOKENS, "google", OWNER_EMAIL, now);
@@ -456,6 +488,152 @@ describe("Refresh", () => {
       await expect(googleAccessToken(hubEnv(over), T0), JSON.stringify(over)).rejects.toBeInstanceOf(NotConfiguredError);
     }
     expect(providers.calls).toEqual([]);
+  });
+});
+
+describe("Connect", () => {
+  /** Nothing was started: no login state in KV, no cookie handed out. */
+  async function expectNoLoginStarted(res: Response, label = ""): Promise<void> {
+    expect(await loginKeys(), label).toEqual([]);
+    expect(res.headers.get("Set-Cookie"), label).toBeNull();
+  }
+
+  const expectNotConfigured = async (res: Response, label = ""): Promise<void> => {
+    expect(res.status, label).toBe(503);
+    expect(await res.json(), label).toEqual({ error: "not_configured" });
+    await expectNoLoginStarted(res, label);
+  };
+
+  it("answers with Google's sign-in address, and sets the login state and its cookie", async () => {
+    const res = await post("/setup/connect/google");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    const { url } = (await res.json()) as { url: string };
+
+    const address = new URL(url);
+    expect(address.origin + address.pathname).toBe("https://accounts.google.com/o/oauth2/v2/auth");
+    expect(address.searchParams.get("client_id")).toBe("test-google-client-id");
+    // The fixed redirect address: the hub's own origin and the Google callback path.
+    expect(address.searchParams.get("redirect_uri")).toBe("https://hub.example.com/oauth/google/callback");
+
+    // The state in the address is the one KV now holds, and the challenge is its verifier's.
+    const state = address.searchParams.get("state")!;
+    expect(await loginKeys()).toEqual([`login:${state}`]);
+    const record = JSON.parse((await env.TOKENS.get(`login:${state}`))!);
+    expect(record.provider).toBe("google");
+    expect(address.searchParams.get("code_challenge")).toBe(await s256(record.verifier));
+
+    expect(res.headers.get("Set-Cookie")).toMatch(/^__Host-hub_login=[A-Za-z0-9_-]{43}; /);
+  });
+
+  it("connect needs POST and the F5 checks", async () => {
+    const viaGet = await get("/setup/connect/google");
+    expect(viaGet.status).toBe(405);
+    expect(viaGet.headers.get("Allow")).toBe("POST");
+    await expectNoLoginStarted(viaGet, "GET");
+
+    const refused: { label: string; headers: Record<string, string>; body?: string; status: number; error: string }[] = [
+      { label: "another origin", headers: { Origin: "https://evil.example", "Content-Type": "application/json" }, status: 403, error: "cross_site" },
+      { label: "no Origin", headers: { "Content-Type": "application/json" }, status: 403, error: "cross_site" },
+      { label: "not JSON", headers: { Origin: HUB, "Content-Type": "text/plain" }, status: 400, error: "bad_body" },
+      { label: "a form", headers: { Origin: HUB, "Content-Type": "application/x-www-form-urlencoded" }, body: "a=1", status: 400, error: "bad_body" },
+      { label: "not an object", headers: JSON_FROM_HUB, body: "[]", status: 400, error: "bad_body" },
+    ];
+    for (const { label, headers, body, status, error } of refused) {
+      const res = await post("/setup/connect/google", hubEnv(), { headers, body });
+      expect(res.status, label).toBe(status);
+      expect(await res.json(), label).toMatchObject({ error });
+      await expectNoLoginStarted(res, label);
+    }
+  });
+
+  it("connect answers not_configured and issues no state when the key, a client setting or HUB_ORIGIN is missing or bad", async () => {
+    const broken: Partial<Env>[] = [
+      { TOKEN_ENC_KEY: undefined },
+      { TOKEN_ENC_KEY: "" },
+      { TOKEN_ENC_KEY: "not a key" },
+      { TOKEN_ENC_KEY: btoa("too short to be a key") },
+      { GOOGLE_CLIENT_ID: undefined },
+      { GOOGLE_CLIENT_ID: "" },
+      { GOOGLE_CLIENT_SECRET: undefined },
+      { GOOGLE_CLIENT_SECRET: "   " },
+      { HUB_ORIGIN: undefined },
+      { HUB_ORIGIN: "" },
+      { HUB_ORIGIN: "not an address" },
+    ];
+    for (const over of broken) {
+      await expectNotConfigured(await post("/setup/connect/google", hubEnv(over)), JSON.stringify(over));
+    }
+  });
+
+  it("connect answers not_configured when HUB_ORIGIN is not an https origin or has a path", async () => {
+    const notAnHttpsOrigin = [
+      "http://hub.example.com",
+      "hub.example.com",
+      "https://hub.example.com/",
+      "https://hub.example.com/hub",
+      "https://hub.example.com?next=1",
+      "https://hub.example.com#top",
+      "https://owner@hub.example.com",
+    ];
+    for (const HUB_ORIGIN of notAnHttpsOrigin) {
+      await expectNotConfigured(await post("/setup/connect/google", hubEnv({ HUB_ORIGIN })), HUB_ORIGIN);
+    }
+  });
+
+  it("connect answers not_configured when HUB_ORIGIN differs from the request's origin", async () => {
+    for (const HUB_ORIGIN of ["https://other.example.com", "https://hub.example.com:8443", "https://hub.example.com.evil.example"]) {
+      await expectNotConfigured(await post("/setup/connect/google", hubEnv({ HUB_ORIGIN })), HUB_ORIGIN);
+    }
+  });
+
+  it("connect refuses under the local-development skip", async () => {
+    // Everything connect needs is set, for a hub at https://localhost. A caller with a real
+    // Access result is served there...
+    const LOCAL = "https://localhost";
+    const settings = hubEnv({ HUB_ORIGIN: LOCAL });
+    const connectRequest = (headers: Record<string, string> = {}) =>
+      new Request(`${LOCAL}/setup/connect/google`, {
+        method: "POST",
+        headers: { Origin: LOCAL, "Content-Type": "application/json", ...headers },
+        body: "{}",
+      });
+    expect((await routeRequest(connectRequest(), settings, OWNER)).status).toBe(200);
+    for (const key of await loginKeys()) await env.TOKENS.delete(key);
+
+    // ...but a request that got past Access by the local-development skip is not (G7).
+    const devEnv = { ...settings, USE_FAKES: "true", DEV_SKIP_ACCESS: "true" } as Env;
+    const res = await worker.fetch(connectRequest({ "CF-Connecting-IP": "127.0.0.1" }), devEnv);
+    // Not 401 or 403: the page reads those as "sign in again".
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "not_enabled" });
+    await expectNoLoginStarted(res);
+  });
+
+  it("an unknown provider name in the /setup routes answers 404", async () => {
+    const unknown = [
+      "/setup/connect/evil",
+      "/setup/connect/Google",
+      "/setup/connect/%67oogle",
+      "/setup/connect/google/",
+      "/setup/connect/google/extra",
+      "/setup/connect/",
+      "/setup/connect",
+      "/setup/disconnect/evil",
+      "/setup/disconnect/",
+      "/setup/elsewhere/google",
+    ];
+    for (const path of unknown) {
+      const res = await post(path);
+      expect(res.status, path).toBe(404);
+      // The router's own answer, not a missing static file.
+      expect(await res.json(), path).toEqual({ error: "not_found" });
+      await expectNoLoginStarted(res, path);
+    }
+  });
+
+  it("connect for TickTick answers not_configured until step 4 builds it", async () => {
+    await expectNotConfigured(await post("/setup/connect/ticktick"));
   });
 });
 
