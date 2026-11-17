@@ -585,6 +585,78 @@ describe("Connect", () => {
     expect(address.searchParams.get("code_challenge")).toBe(await s256(record.verifier));
 
     expect(res.headers.get("Set-Cookie")).toMatch(/^__Host-hub_login=[A-Za-z0-9_-]{43}; /);
+
+    // Nothing was stored, so there was nothing to ask Google for.
+    expect(providers.calls).toEqual([]);
+  });
+
+  it("connect ends a connection that is already stored, so a new one can't leave its grant alive", async () => {
+    // Say a second /setup tab that still shows Connect although Google is connected (G1).
+    await (await tokenStore()).put("google", connection());
+    providers.answer(GOOGLE_REVOKE_URL, revoked());
+    await startLogin();
+
+    // One call to Google: the stored refresh token, which ends the whole grant, in the form body.
+    expect(providers.calls).toHaveLength(1);
+    expect(providers.calls[0]).toMatchObject({ url: GOOGLE_REVOKE_URL, method: "POST", redirect: "manual" });
+    expect(Object.fromEntries(providers.calls[0]!.form)).toEqual({ token: "google-refresh-one" });
+    // The old record is gone before the owner leaves for Google: KV holds the new login state only.
+    expect(await allKeys()).toEqual(await loginKeys());
+    expect(await loginKeys()).toHaveLength(1);
+  });
+
+  it("the connection made after that is the only one, and nothing of it is revoked", async () => {
+    await (await tokenStore()).put("google", connection());
+    providers.answer(GOOGLE_REVOKE_URL, revoked());
+    const login = await startLogin();
+    providers.answer(GOOGLE_TOKEN_URL, googleTokens({ access_token: "google-access-new", refresh_token: "google-refresh-new" }));
+    await expectSentBack(await callback(login), "connected");
+
+    expect(await (await tokenStore()).get("google")).toMatchObject({
+      accessToken: "google-access-new",
+      refreshToken: "google-refresh-new",
+    });
+    // The old token was revoked before the new grant existed. Nothing is revoked after it:
+    // Google's docs don't say a revoke leaves the account's other tokens for this app alone.
+    expect(providers.calls.map((c) => c.url)).toEqual([GOOGLE_REVOKE_URL, GOOGLE_TOKEN_URL]);
+    expect(providers.calls[0]!.form.get("token")).toBe("google-refresh-one");
+  });
+
+  it("a revoke that fails does not stop connect, and the old record still goes", async () => {
+    const failures = [
+      new Response("upstream trouble", { status: 500 }),
+      () => {
+        throw new TypeError("connection reset");
+      },
+    ];
+    for (const failure of failures) {
+      await (await tokenStore()).put("google", connection());
+      providers.answer(GOOGLE_REVOKE_URL, failure);
+      await startLogin();
+      expect(await env.TOKENS.get("oauth:google")).toBeNull();
+    }
+    expect(providers.calls.map((c) => c.url)).toEqual(failures.map(() => GOOGLE_REVOKE_URL));
+
+    // A record that can't be decrypted has nothing to revoke with: it goes, and Google is not called.
+    await env.TOKENS.put("oauth:google", "v1.garbage.garbage");
+    await startLogin();
+    expect(await env.TOKENS.get("oauth:google")).toBeNull();
+    expect(providers.calls).toHaveLength(failures.length);
+  });
+
+  it("a connect that is refused leaves a stored connection as it was", async () => {
+    await (await tokenStore()).put("google", connection());
+    const stored = await env.TOKENS.get("oauth:google");
+
+    await expectNotConfigured(await post("/setup/connect/google", hubEnv({ HUB_ORIGIN: undefined })), "no HUB_ORIGIN");
+    await expectNotConfigured(await post("/setup/connect/google", hubEnv({ GOOGLE_CLIENT_SECRET: undefined })), "no client secret");
+    const crossSite = await post("/setup/connect/google", hubEnv(), {
+      headers: { Origin: "https://evil.example", "Content-Type": "application/json" },
+    });
+    expect(crossSite.status).toBe(403);
+
+    expect(await env.TOKENS.get("oauth:google")).toBe(stored);
+    expect(providers.calls).toEqual([]);
   });
 
   it("connect needs POST and the F5 checks", async () => {
@@ -768,14 +840,16 @@ describe("Callback", () => {
       expect(await allKeys()).toEqual([]);
     }
 
-    // A connection was stored before: it is byte for byte what it was.
-    await (await tokenStore()).put("google", connection());
-    const existing = await env.TOKENS.get("oauth:google");
+    // A connection is stored by the time the callback runs (connect ends one that is there
+    // before, so this one arrived since): it is byte for byte what it was.
     for (const failure of failures()) {
       const login = await startLogin();
+      await (await tokenStore()).put("google", connection());
+      const existing = await env.TOKENS.get("oauth:google");
       providers.answer(GOOGLE_TOKEN_URL, failure);
       await expectSentBack(await callback(login), "failed");
       expect(await env.TOKENS.get("oauth:google")).toBe(existing);
+      await env.TOKENS.delete("oauth:google");
     }
     // One request per attempt: no retry, and the redirect was not followed.
     expect(providers.calls.map((c) => c.url)).toEqual(Array(8).fill(GOOGLE_TOKEN_URL));
@@ -850,12 +924,7 @@ describe("Callback", () => {
   });
 
   it("the callback answers 303 to /setup with no-store and clears the cookie", async () => {
-    // On success.
-    const good = await startLogin();
-    providers.answer(GOOGLE_TOKEN_URL, googleTokens());
-    await expectSentBack(await callback(good), "connected");
-
-    // And on every way of failing, with the same answer each time.
+    // On every way of failing, with the same answer each time.
     const login = await startLogin();
     await expectSentBack(await callback({ state: "never-issued", cookie: login.cookie }), "failed", "unknown state");
     await expectSentBack(await get("/oauth/google/callback?code=the-code"), "failed", "no state");
@@ -864,9 +933,13 @@ describe("Callback", () => {
     const broken = { get: () => Promise.reject(new Error("KV is down")) } as unknown as KVNamespace;
     await expectSentBack(await callback(await startLogin(), { e: hubEnv({ TOKENS: broken }) }), "failed", "KV down");
     await expectSentBack(await callback(await startLogin(), { e: hubEnv({ TOKEN_ENC_KEY: "not a key" }) }), "failed", "bad key");
-
     // None of those asked Google for anything.
-    expect(providers.calls).toHaveLength(1);
+    expect(providers.calls).toEqual([]);
+
+    // And on success.
+    const good = await startLogin();
+    providers.answer(GOOGLE_TOKEN_URL, googleTokens());
+    await expectSentBack(await callback(good), "connected");
   });
 
   it("a token that can't be stored is revoked", async () => {

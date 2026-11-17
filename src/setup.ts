@@ -140,6 +140,13 @@ export async function connect(request: Request, env: Env, access: VerifiedAccess
   const settings = await loginSettings(env, new URL(request.url).origin);
   if (!settings) return notConfigured();
 
+  // The page offers Connect only while not connected (G1), but a second tab can still press
+  // it. A connection that is already stored is ended here, before the owner leaves for
+  // Google, so the new one can't leave its grant alive. Best-effort: connect goes on
+  // whatever the revoke did. It is not done after the new token is stored: Google's docs
+  // don't say that revoking one token leaves the account's other tokens for this app alone.
+  await endGoogleConnection(env);
+
   const login = await issueLoginState(env.TOKENS, provider, access.email, Date.now());
   const url = googleSignInUrl({
     clientId: settings.client.clientId,
@@ -153,27 +160,35 @@ export async function connect(request: Request, env: Env, access: VerifiedAccess
 }
 
 /**
- * Ends a connection: revokes the token at the provider and deletes the record (G1). The
- * record is deleted whatever the revoke does. `removeAccess` tells the page to show its
- * note: the token could not be revoked (the call failed, or the record can't be decrypted,
- * as after a key change), so the owner should remove the hub on the provider's account page.
+ * Ends the stored Google connection, if there is one: revokes its token at Google and
+ * deletes the record, whatever the revoke does (G1). Returns true when a record was stored
+ * and its token could not be revoked (the call failed, or the record can't be decrypted, as
+ * after a key change), so Google may still hold a grant.
  */
-export async function disconnect(env: Env, provider: Provider): Promise<Response> {
-  if (provider !== "google") return notConfigured();
-  if (!(await tokenRecordExists(env.TOKENS, provider))) return json({ ok: true, removeAccess: false });
+async function endGoogleConnection(env: Env): Promise<boolean> {
+  if (!(await tokenRecordExists(env.TOKENS, "google"))) return false;
 
   let revoked = false;
   try {
     const store = new TokenStore(env.TOKENS, await importKey(env.TOKEN_ENC_KEY));
-    const token = await store.get(provider);
+    const token = await store.get("google");
     // The refresh token ends the whole grant. Without one, the access token is what there is.
     if (token) revoked = await revokeGoogleToken(token.refreshToken ?? token.accessToken);
   } catch {
     // The key is missing or bad: the record can't be read, so there is nothing to revoke with.
   } finally {
-    await deleteTokenRecord(env.TOKENS, provider);
+    await deleteTokenRecord(env.TOKENS, "google");
   }
-  return json({ ok: true, removeAccess: !revoked });
+  return !revoked;
+}
+
+/**
+ * Ends a connection (G1). `removeAccess` tells the page to show its note: the token could
+ * not be revoked, so the owner should remove the hub on the provider's account page.
+ */
+export async function disconnect(env: Env, provider: Provider): Promise<Response> {
+  if (provider !== "google") return notConfigured();
+  return json({ ok: true, removeAccess: await endGoogleConnection(env) });
 }
 
 /** How a callback ended. It travels to /setup as this one fixed word, and nothing else does. */
