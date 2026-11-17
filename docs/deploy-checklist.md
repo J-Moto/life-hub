@@ -29,6 +29,24 @@ At the first deploy Wrangler may create the KV namespace and write its ID into `
 
 Checks 2 and 4 are the two that step 1a's "done when" names. Check 7 is run again after steps 5 and 6.
 
+## Step 2. Google connection
+
+Before these: the Google OAuth app exists (redirect address `https://<hub>/oauth/google/callback`, scope `calendar.events.readonly`, status "In production"), and `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `HUB_ORIGIN` are set on the Worker. `HUB_ORIGIN` is `https://<hub>` exactly: no path and no slash at the end.
+
+| # | Check | How | Expected |
+|---|---|---|---|
+| 8 | The setup page shows both services | Signed in, open `https://<hub>/setup` | "not connected" for Google and for TickTick. Google has a Connect button; TickTick has none until step 4. |
+| 9 | A missing setting is caught before Google | Only if a setting above is not entered yet: press Connect | "Not set up yet." The browser does not leave the hub. |
+| 10 | Connect works | Press Connect, pass the "Google hasn't verified this app" screen, approve | Back on `/setup` with "Connected.", the address bar shows `/setup` with nothing after it, and Google shows "connected" with only a Disconnect button |
+| 11 | The grant is the narrow one | Open the Google account's page for third-party apps with access | The hub is listed with access to view calendar events only |
+| 12 | The PKCE test (once) | Disconnect. Set `PKCE_TEST_WRONG_VERIFIER` to `true` on the Worker, press Connect and approve, note what `/setup` says, then **unset the var** and connect again | Record the result in v1.md ("To confirm", and G6b): "The connection didn't complete" means Google rejects a wrong verifier; "Connected." means it does not check. Either is acceptable (G6b). If it connected, press Disconnect before unsetting the var, so the test's grant is revoked. |
+| 13 | What the logs hold | In the Cloudflare dashboard, open the Worker's logs for the callback request of check 10 | Record in v1.md whether the request's address is logged with its query string (code and `state`). The hub's own lines hold only fixed words, status codes and timings: `provider_call google.token 200 <n>ms`, `oauth_callback google connected`. No token, code or email. |
+| 14 | Does a refresh return a new refresh token? | **Can't be checked at step 2.** Nothing refreshes the Google token until the calendar route exists (step 3b), and the hub logs nothing about Google's refresh answer (G6 allows field names only for TickTick's step 4 checks). | Open. The code is safe either way for one refresh at a time: a new refresh token, if one comes, is saved. Decide at step 3b how to answer the "To confirm" row: a "refresh token changed: yes/no" log line under a G6 exception like TickTick's, or leave it open. |
+| 15 | Disconnect revokes | Press Disconnect on `/setup` | "Disconnected." with no remove-access note, Google shows "not connected", and the hub is gone from the Google account's third-party access page (it can take a moment). If the note shows instead, remove the hub there by hand and record it: the hub sends the token in the form body, where Google's example puts it in the address. |
+| 16 | Connect again | Press Connect and approve | "Connected." This is the connection the later steps use. |
+
+Checks 10, 12 and 13 are the ones step 2's "done when" names that can be run now (Google connected; two of the three "To confirm" rows). The third row is check 14.
+
 ## Record
 
 One row per deploy.
