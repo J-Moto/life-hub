@@ -1016,6 +1016,117 @@ describe("PKCE switch", () => {
   });
 });
 
+describe("Disconnect", () => {
+  const putConnection = async (over: Partial<StoredToken> = {}) => (await tokenStore()).put("google", connection(over));
+
+  /** Disconnect answered, and the page is told whether to show the remove-access note. */
+  async function expectDisconnected(res: Response, removeAccess: boolean, label = ""): Promise<void> {
+    expect(res.status, label).toBe(200);
+    expect(await res.json(), label).toEqual({ ok: true, removeAccess });
+    expect(await env.TOKENS.get("oauth:google"), label).toBeNull();
+  }
+
+  it("disconnect revokes and deletes", async () => {
+    await putConnection();
+    providers.answer(GOOGLE_REVOKE_URL, revoked());
+    await expectDisconnected(await post("/setup/disconnect/google"), false);
+
+    // One call: the refresh token, which ends the whole grant, in the form body.
+    expect(providers.calls).toHaveLength(1);
+    expect(providers.calls[0]).toMatchObject({ url: GOOGLE_REVOKE_URL, method: "POST", redirect: "manual" });
+    expect(Object.fromEntries(providers.calls[0]!.form)).toEqual({ token: "google-refresh-one" });
+
+    // A record with no refresh token: the access token is what there is to revoke.
+    await putConnection({ refreshToken: undefined });
+    providers.answer(GOOGLE_REVOKE_URL, revoked());
+    await expectDisconnected(await post("/setup/disconnect/google"), false);
+    expect(Object.fromEntries(providers.calls[1]!.form)).toEqual({ token: "google-access-one" });
+  });
+
+  it("a failed revoke still deletes", async () => {
+    const failures = [
+      oauthError("invalid_token", 400),
+      new Response("upstream trouble", { status: 500 }),
+      redirectTo("https://elsewhere.example/revoke"),
+      () => {
+        throw new TypeError("connection reset");
+      },
+    ];
+    for (const failure of failures) {
+      await putConnection();
+      providers.answer(GOOGLE_REVOKE_URL, failure);
+      // The page is told to say: remove the hub's access on the provider's own account page.
+      await expectDisconnected(await post("/setup/disconnect/google"), true);
+    }
+    // One request each: the redirect was not followed.
+    expect(providers.calls.map((c) => c.url)).toEqual(failures.map(() => GOOGLE_REVOKE_URL));
+
+    // A provider that never answers is given up on after 10 seconds, and the record still goes.
+    await putConnection();
+    providers.answer(GOOGLE_REVOKE_URL, neverAnswers());
+    vi.useFakeTimers();
+    const pending = post("/setup/disconnect/google");
+    await vi.advanceTimersByTimeAsync(10_000);
+    vi.useRealTimers();
+    await expectDisconnected(await pending, true);
+  });
+
+  it("disconnect deletes a record that can't be decrypted and shows the remove-access note", async () => {
+    // Not a record at all.
+    await env.TOKENS.put("oauth:google", "v1.garbage.garbage");
+    await expectDisconnected(await post("/setup/disconnect/google"), true, "garbage");
+
+    // Written under another key, as after a key change (G2).
+    const otherKey = await importKey(btoa("B".repeat(32)));
+    await new TokenStore(env.TOKENS, otherKey).put("google", connection());
+    await expectDisconnected(await post("/setup/disconnect/google"), true, "another key");
+
+    // A good record, but the key is missing or bad now.
+    for (const TOKEN_ENC_KEY of [undefined, "not a key"]) {
+      await putConnection();
+      await expectDisconnected(await post("/setup/disconnect/google", hubEnv({ TOKEN_ENC_KEY })), true, String(TOKEN_ENC_KEY));
+    }
+
+    // Nothing could be revoked, so Google was not called.
+    expect(providers.calls).toEqual([]);
+  });
+
+  it("disconnect with nothing stored has nothing to do", async () => {
+    await expectDisconnected(await post("/setup/disconnect/google"), false);
+    expect(providers.calls).toEqual([]);
+  });
+
+  it("disconnect needs POST and the F5 checks", async () => {
+    await putConnection();
+    const stored = await env.TOKENS.get("oauth:google");
+
+    const viaGet = await get("/setup/disconnect/google");
+    expect(viaGet.status).toBe(405);
+    expect(viaGet.headers.get("Allow")).toBe("POST");
+
+    const refused: { headers: Record<string, string>; status: number; error: string }[] = [
+      { headers: { Origin: "https://evil.example", "Content-Type": "application/json" }, status: 403, error: "cross_site" },
+      { headers: { "Content-Type": "application/json" }, status: 403, error: "cross_site" },
+      { headers: { Origin: HUB, "Content-Type": "text/plain" }, status: 400, error: "bad_body" },
+    ];
+    for (const { headers, status, error } of refused) {
+      const res = await post("/setup/disconnect/google", hubEnv(), { headers });
+      expect(res.status, error).toBe(status);
+      expect(await res.json(), error).toMatchObject({ error });
+    }
+
+    // The connection is as it was, and Google was not called.
+    expect(await env.TOKENS.get("oauth:google")).toBe(stored);
+    expect(providers.calls).toEqual([]);
+  });
+
+  it("disconnect for TickTick answers not_configured until step 4 builds it", async () => {
+    const res = await post("/setup/disconnect/ticktick");
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "not_configured" });
+  });
+});
+
 describe("Provider calls", () => {
   const send = () =>
     providerFetch("test.call", GOOGLE_TOKEN_URL, {

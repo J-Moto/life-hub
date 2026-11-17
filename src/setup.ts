@@ -7,7 +7,7 @@
 import type { Env } from "./env";
 import type { VerifiedAccess } from "./auth/access";
 import { json } from "./api";
-import { TokenStore, importKey, type Provider } from "./crypto/tokens";
+import { TokenStore, deleteTokenRecord, importKey, tokenRecordExists, type Provider } from "./crypto/tokens";
 import {
   GOOGLE_SCOPE,
   exchangeGoogleCode,
@@ -83,6 +83,30 @@ export async function connect(request: Request, env: Env, access: VerifiedAccess
   const res = json({ url });
   res.headers.set("Set-Cookie", login.cookie);
   return res;
+}
+
+/**
+ * Ends a connection: revokes the token at the provider and deletes the record (G1). The
+ * record is deleted whatever the revoke does. `removeAccess` tells the page to show its
+ * note: the token could not be revoked (the call failed, or the record can't be decrypted,
+ * as after a key change), so the owner should remove the hub on the provider's account page.
+ */
+export async function disconnect(env: Env, provider: Provider): Promise<Response> {
+  if (provider !== "google") return notConfigured();
+  if (!(await tokenRecordExists(env.TOKENS, provider))) return json({ ok: true, removeAccess: false });
+
+  let revoked = false;
+  try {
+    const store = new TokenStore(env.TOKENS, await importKey(env.TOKEN_ENC_KEY));
+    const token = await store.get(provider);
+    // The refresh token ends the whole grant. Without one, the access token is what there is.
+    if (token) revoked = await revokeGoogleToken(token.refreshToken ?? token.accessToken);
+  } catch {
+    // The key is missing or bad: the record can't be read, so there is nothing to revoke with.
+  } finally {
+    await deleteTokenRecord(env.TOKENS, provider);
+  }
+  return json({ ok: true, removeAccess: !revoked });
 }
 
 /** How a callback ended. It travels to /setup as this one fixed word, and nothing else does. */
