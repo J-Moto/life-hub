@@ -8,6 +8,8 @@ import {
   getHabits,
   getTasks,
   json,
+  notConfigured,
+  notEnabled,
   readCalendarConfig,
   readConfig,
   readHabitsConfig,
@@ -34,7 +36,6 @@ function matchWriteRoute(pathname: string): WriteRoute | null {
 }
 
 const notConnected = (e: NotConnectedError): Response => json({ error: "not_connected", provider: e.provider }, 503);
-const notConfigured = (): Response => json({ error: "not_configured" }, 503);
 
 /**
  * One section's way in: the provider first (`not_connected`), then that section's own
@@ -78,8 +79,6 @@ function has<K extends keyof TaskWriter>(
 ): writes is TaskWrites & Pick<TaskWriter, K> {
   return methods.every((m) => typeof writes[m] === "function");
 }
-
-const notEnabled = (): Response => json({ error: "not_enabled" }, 503);
 
 /**
  * A write route. The write gate comes first, per route: a route whose own write methods
@@ -159,6 +158,9 @@ const CALLBACK_ROUTE = /^\/oauth\/(ticktick|google)\/callback$/;
 const methodNotAllowed = (allow: string): Response =>
   new Response("Method not allowed", { status: 405, headers: { Allow: allow } });
 
+/** The two connection routes that are a GET and nothing else: the setup page and the callback. */
+const isGetOnlyRoute = (pathname: string): boolean => pathname === "/setup" || CALLBACK_ROUTE.test(pathname);
+
 /**
  * The connection routes (`/setup*` and `/oauth/*`), or null for any other path. A path under
  * them that is not a route is a 404 here: it never falls through to the static files.
@@ -212,8 +214,10 @@ export async function routeRequest(request: Request, env: Env, access: VerifiedA
 
   // Every POST carries a JSON object (an empty one when there is nothing to send). The body
   // is read here, once. A cross-site form can't send `application/json` without a preflight.
+  // A POST to a GET-only connection route is not asked for one: `routeSetup` answers it 405
+  // whatever it carries, and nothing reads its body.
   let body: Record<string, unknown> | null = null;
-  if (method === "POST") {
+  if (method === "POST" && !isGetOnlyRoute(url.pathname)) {
     body = await readJson(request);
     if (!body) return json({ error: "bad_body" }, 400);
   }

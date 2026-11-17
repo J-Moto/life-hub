@@ -128,6 +128,15 @@ export function json(body: unknown, status = 200): Response {
   });
 }
 
+// Two of the answers the page knows by name (docs/design/v1.md, section 3). One place makes
+// each, so `/api` and `/setup` can't come to answer differently.
+
+/** A setting this route needs is missing or bad. */
+export const notConfigured = (): Response => json({ error: "not_configured" }, 503);
+
+/** This route is not switched on, or connections are not made here (G7). */
+export const notEnabled = (): Response => json({ error: "not_enabled" }, 503);
+
 /** The UTC offset of `timeZone` at `when`, as "+HH:MM" / "-HH:MM". */
 export function offsetFor(when: Date, timeZone: string): string {
   const name = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "longOffset" })

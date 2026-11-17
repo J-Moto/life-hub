@@ -1007,6 +1007,9 @@ describe("Callback", () => {
     const others = [
       new Request(address, { method: "HEAD", headers: { Cookie: login.cookie } }),
       new Request(address, { method: "POST", headers: { ...JSON_FROM_HUB, Cookie: login.cookie }, body: "{}" }),
+      // The method is the answer whatever the POST carries: no JSON body is still a 405.
+      new Request(address, { method: "POST", headers: { Origin: HUB, "Content-Type": "text/plain", Cookie: login.cookie }, body: "hello" }),
+      new Request(address, { method: "POST", headers: { Origin: HUB, Cookie: login.cookie } }),
     ];
     for (const request of others) {
       const res = await routeRequest(request, hubEnv(), OWNER);
@@ -1182,6 +1185,18 @@ describe("Disconnect", () => {
     expect(providers.calls).toEqual([]);
   });
 
+  it("disconnect and connect read the stored record once", async () => {
+    // One read decides both whether there is a record and what to revoke, so the two can't disagree.
+    for (const path of ["/setup/disconnect/google", "/setup/connect/google"]) {
+      await putConnection();
+      providers.answer(GOOGLE_REVOKE_URL, revoked());
+      const { kv, reads } = watchedKv();
+      expect((await post(path, hubEnv({ TOKENS: kv }))).status, path).toBe(200);
+      expect(reads, path).toEqual(["oauth:google"]);
+      expect(providers.callsTo(GOOGLE_REVOKE_URL).at(-1)!.form.get("token"), path).toBe("google-refresh-one");
+    }
+  });
+
   it("disconnect needs POST and the F5 checks", async () => {
     await putConnection();
     const stored = await env.TOKENS.get("oauth:google");
@@ -1296,6 +1311,28 @@ describe("Setup page", () => {
     expect(viaPost.headers.get("Allow")).toBe("GET");
     const viaHead = await routeRequest(new Request(`${HUB}/setup`, { method: "HEAD" }), hubEnv(), OWNER);
     expect(viaHead.status).toBe(405);
+
+    // The method is the answer whatever the POST carries: a body that is not JSON is still a 405.
+    for (const [label, headers, body] of [
+      ["text", { Origin: HUB, "Content-Type": "text/plain" }, "hello"],
+      ["a form", { Origin: HUB, "Content-Type": "application/x-www-form-urlencoded" }, "a=1"],
+      ["not an object", JSON_FROM_HUB, "[]"],
+    ] as const) {
+      const res = await post("/setup", hubEnv(), { headers, body });
+      expect(res.status, label).toBe(405);
+      expect(res.headers.get("Allow"), label).toBe("GET");
+    }
+    // A POST from another site is still refused as that, before anything else.
+    const crossSite = await post("/setup", hubEnv(), { headers: { Origin: "https://evil.example", "Content-Type": "text/plain" } });
+    expect(crossSite.status).toBe(403);
+  });
+
+  it("reads each provider's record once", async () => {
+    await (await tokenStore()).put("google", connection());
+    const { kv, reads } = watchedKv();
+    const html = await page(hubEnv({ TOKENS: kv }));
+    expect(part(html, "google").status).toBe("connected");
+    expect([...reads].sort()).toEqual(["oauth:google", "oauth:ticktick"]);
   });
 });
 

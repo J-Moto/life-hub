@@ -44,7 +44,8 @@ for (const section of document.querySelectorAll("section[data-provider]")) {
       control.disabled = true;
       const out = setupOutcome(action, provider, await post(`/setup/${action}/${provider}`));
 
-      // Off to the provider's sign-in page. The button stays off until the page is left.
+      // Off to the provider's sign-in page. The button stays off until the page is left
+      // (and comes back on if the browser later restores this page: see `pageshow` below).
       if (out.goTo) {
         location.assign(out.goTo);
         return;
@@ -61,3 +62,10 @@ for (const section of document.querySelectorAll("section[data-provider]")) {
     });
   }
 }
+
+// Back from the provider's sign-in page, a browser may restore this page as it was left
+// (the back/forward cache), with the pressed button still off. Switch the buttons back on.
+window.addEventListener("pageshow", (event) => {
+  if (!event.persisted) return;
+  for (const control of document.querySelectorAll("button[data-action]")) control.disabled = false;
+});

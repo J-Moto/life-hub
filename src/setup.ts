@@ -6,8 +6,15 @@
 
 import type { Env } from "./env";
 import type { VerifiedAccess } from "./auth/access";
-import { json } from "./api";
-import { TokenStore, deleteTokenRecord, importKey, tokenRecordExists, type Provider } from "./crypto/tokens";
+import { json, notConfigured, notEnabled } from "./api";
+import {
+  TokenStore,
+  deleteTokenRecord,
+  importKey,
+  tokenRecordExists,
+  type Provider,
+  type TokenRead,
+} from "./crypto/tokens";
 import {
   GOOGLE_SCOPE,
   exchangeGoogleCode,
@@ -18,8 +25,6 @@ import {
   type GoogleClient,
 } from "./oauth/google";
 import { clearLoginCookie, consumeLoginState, issueLoginState, randomToken } from "./oauth/state";
-
-const notConfigured = (): Response => json({ error: "not_configured" }, 503);
 
 /** `HUB_ORIGIN` when it is an `https` origin with nothing after it, else null. */
 function hubOrigin(env: Env): string | null {
@@ -52,24 +57,26 @@ async function loginSettings(env: Env, requestOrigin: string): Promise<LoginSett
   const client = googleClient(env);
   const origin = hubOrigin(env);
   if (!client || !origin || origin !== requestOrigin) return null;
+  const store = await tokenStore(env);
+  return store ? { store, client, redirectUri: `${origin}/oauth/google/callback` } : null;
+}
+
+/** The token store under the Worker's key, or null when the key is missing or bad. */
+async function tokenStore(env: Env): Promise<TokenStore | null> {
   try {
-    const store = new TokenStore(env.TOKENS, await importKey(env.TOKEN_ENC_KEY));
-    return { store, client, redirectUri: `${origin}/oauth/google/callback` };
+    return new TokenStore(env.TOKENS, await importKey(env.TOKEN_ENC_KEY));
   } catch {
     return null;
   }
 }
 
-/** What /setup shows for one provider. `stored` is true for any record, readable or not. */
-async function connectionState(env: Env, provider: Provider): Promise<{ connected: boolean; stored: boolean }> {
-  if (!(await tokenRecordExists(env.TOKENS, provider))) return { connected: false, stored: false };
-  try {
-    const store = new TokenStore(env.TOKENS, await importKey(env.TOKEN_ENC_KEY));
-    return { connected: (await store.get(provider)) !== null, stored: true };
-  } catch {
-    // The key is missing or bad: the record is there but can't be read.
-    return { connected: false, stored: true };
-  }
+/**
+ * What is stored for a provider, in one KV read, so "is there a record" and "what does it
+ * hold" can't disagree. Without a usable key (`store` is null) any record is unreadable.
+ */
+async function readRecord(env: Env, store: TokenStore | null, provider: Provider): Promise<TokenRead> {
+  if (store) return store.read(provider);
+  return (await tokenRecordExists(env.TOKENS, provider)) ? { status: "unreadable" } : { status: "none" };
 }
 
 const hiddenIf = (hide: boolean): string => (hide ? " hidden" : "");
@@ -84,12 +91,14 @@ const hiddenIf = (hide: boolean): string => (hide ? " hidden" : "");
  * one that can't be decrypted, so the G2 key-change steps can delete it.
  */
 export async function setupPage(env: Env, access: VerifiedAccess): Promise<Response> {
-  const [google, ticktick] = await Promise.all([connectionState(env, "google"), connectionState(env, "ticktick")]);
-  const status = (connected: boolean): string => (connected ? "connected" : "not connected");
+  const store = await tokenStore(env);
+  const [google, ticktick] = await Promise.all([readRecord(env, store, "google"), readRecord(env, store, "ticktick")]);
+  // A record that can't be decrypted shows as "not connected" (G1).
+  const status = (read: TokenRead): string => (read.status === "ok" ? "connected" : "not connected");
   // Real connections are made on the deployed hub only (G7): no Connect button in local dev.
   const connectButton = access.devBypass
     ? ""
-    : `<button type="button" data-action="connect"${hiddenIf(google.connected)}>Connect</button>\n    `;
+    : `<button type="button" data-action="connect"${hiddenIf(google.status === "ok")}>Connect</button>\n    `;
   const localNote = access.devBypass ? "\n  <p>Connections are made on the deployed hub.</p>" : "";
 
   const html = `<!doctype html>
@@ -108,14 +117,14 @@ export async function setupPage(env: Env, access: VerifiedAccess): Promise<Respo
   <p id="note" role="status"></p>${localNote}
   <section data-provider="google">
     <h2>Google Calendar</h2>
-    <p class="status">${status(google.connected)}</p>
+    <p class="status">${status(google)}</p>
     <p>
-    ${connectButton}<button type="button" data-action="disconnect"${hiddenIf(!google.stored)}>Disconnect</button>
+    ${connectButton}<button type="button" data-action="disconnect"${hiddenIf(google.status === "none")}>Disconnect</button>
     </p>
   </section>
   <section data-provider="ticktick">
     <h2>TickTick</h2>
-    <p class="status">${status(ticktick.connected)}</p>
+    <p class="status">${status(ticktick)}</p>
   </section>
   <p><a href="/">Back to the hub</a></p>
 </main>
@@ -134,7 +143,7 @@ export async function setupPage(env: Env, access: VerifiedAccess): Promise<Respo
 export async function connect(request: Request, env: Env, access: VerifiedAccess, provider: Provider): Promise<Response> {
   // Real connections are made on the deployed hub only (G7). Not a 401 or 403, which the
   // page would read as "sign in again".
-  if (access.devBypass) return json({ error: "not_enabled" }, 503);
+  if (access.devBypass) return notEnabled();
   if (provider !== "google") return notConfigured();
 
   const settings = await loginSettings(env, new URL(request.url).origin);
@@ -145,7 +154,7 @@ export async function connect(request: Request, env: Env, access: VerifiedAccess
   // Google, so the new one can't leave its grant alive. Best-effort: connect goes on
   // whatever the revoke did. It is not done after the new token is stored: Google's docs
   // don't say that revoking one token leaves the account's other tokens for this app alone.
-  await endGoogleConnection(env);
+  await endGoogleConnection(env, settings.store);
 
   const login = await issueLoginState(env.TOKENS, provider, access.email, Date.now());
   const url = googleSignInUrl({
@@ -165,20 +174,16 @@ export async function connect(request: Request, env: Env, access: VerifiedAccess
  * and its token could not be revoked (the call failed, or the record can't be decrypted, as
  * after a key change), so Google may still hold a grant.
  */
-async function endGoogleConnection(env: Env): Promise<boolean> {
-  if (!(await tokenRecordExists(env.TOKENS, "google"))) return false;
+async function endGoogleConnection(env: Env, store: TokenStore | null): Promise<boolean> {
+  const read = await readRecord(env, store, "google");
+  if (read.status === "none") return false;
 
-  let revoked = false;
-  try {
-    const store = new TokenStore(env.TOKENS, await importKey(env.TOKEN_ENC_KEY));
-    const token = await store.get("google");
-    // The refresh token ends the whole grant. Without one, the access token is what there is.
-    if (token) revoked = await revokeGoogleToken(token.refreshToken ?? token.accessToken);
-  } catch {
-    // The key is missing or bad: the record can't be read, so there is nothing to revoke with.
-  } finally {
-    await deleteTokenRecord(env.TOKENS, "google");
-  }
+  // A record that can't be read has nothing to revoke with. For one that can: the refresh
+  // token ends the whole grant; without one, the access token is what there is. The revoke
+  // never throws, so the record is deleted whatever it did.
+  const revoked =
+    read.status === "ok" && (await revokeGoogleToken(read.token.refreshToken ?? read.token.accessToken));
+  await deleteTokenRecord(env.TOKENS, "google");
   return !revoked;
 }
 
@@ -188,7 +193,7 @@ async function endGoogleConnection(env: Env): Promise<boolean> {
  */
 export async function disconnect(env: Env, provider: Provider): Promise<Response> {
   if (provider !== "google") return notConfigured();
-  return json({ ok: true, removeAccess: await endGoogleConnection(env) });
+  return json({ ok: true, removeAccess: await endGoogleConnection(env, await tokenStore(env)) });
 }
 
 /** How a callback ended. It travels to /setup as this one fixed word, and nothing else does. */
