@@ -52,6 +52,26 @@ describe("Worker front door", () => {
     }
   });
 
+  it("refuses the setup page, connect, disconnect and the OAuth callback without Access", async () => {
+    // The callback is the one GET that writes (v1.md F5). Access stands in front of it like
+    // everything else, so its state, cookie and email checks are never the only guard.
+    for (const path of ["/setup", "/oauth/google/callback?state=abc&code=the-code", "/oauth/ticktick/callback?state=abc&code=the-code"]) {
+      const res = await SELF.fetch(`https://hub.example.com${path}`);
+      expect(res.status, path).toBe(401);
+      expect(res.headers.get("Location"), path).toBeNull();
+      expect(res.headers.get("Set-Cookie"), path).toBeNull();
+    }
+    for (const path of ["/setup/connect/google", "/setup/disconnect/google"]) {
+      const res = await SELF.fetch(`https://hub.example.com${path}`, {
+        method: "POST",
+        headers: { Origin: "https://hub.example.com", "Content-Type": "application/json" },
+        body: "{}",
+      });
+      expect(res.status, path).toBe(401);
+      expect(res.headers.get("Set-Cookie"), path).toBeNull();
+    }
+  });
+
   it("answers 401 to everything when the Access settings are missing", async () => {
     // The first deploy can run before the Access settings are entered (docs/deploy-checklist.md, check 1).
     const noAccess = { TIME_ZONE: "America/Indiana/Indianapolis", USE_FAKES: "false" } as unknown as Env;

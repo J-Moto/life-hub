@@ -1213,6 +1213,97 @@ describe("Setup page", () => {
   });
 });
 
+describe("Logs", () => {
+  it("no token value appears in any log line", async () => {
+    const lines: string[] = [];
+    const levels = ["log", "info", "warn", "error", "debug"] as const;
+    const spies = levels.map((level) =>
+      vi.spyOn(console, level).mockImplementation((...args: unknown[]) => {
+        lines.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+      }),
+    );
+    const secrets = new Set<string>([
+      "the-code",
+      "test-google-client-secret",
+      OWNER_EMAIL,
+      "google-access-one",
+      "google-access-two",
+      "google-refresh-one",
+      "google-refresh-two",
+    ]);
+    const cookieValue = (login: Login) => login.cookie.split("=")[1]!;
+
+    try {
+      // A connection that works.
+      const good = await startLogin();
+      providers.answer(GOOGLE_TOKEN_URL, googleTokens());
+      await expectSentBack(await callback(good), "connected");
+      secrets.add(good.state).add(good.challenge).add(cookieValue(good));
+      secrets.add(providers.calls[0]!.form.get("code_verifier")!);
+
+      // Callbacks that fail in each way: a refused state, an error from Google, a failed
+      // exchange, no refresh token (revoked), a redirect, and a token that can't be stored.
+      const refusedState = await startLogin();
+      await callback({ state: refusedState.state, cookie: "" });
+      const denied = await startLogin();
+      await callback(denied, { query: { error: "access_denied", error_description: "the owner said no" } });
+      const failedExchange = await startLogin();
+      providers.answer(GOOGLE_TOKEN_URL, oauthError("invalid_grant"));
+      await callback(failedExchange);
+      const noRefresh = await startLogin();
+      providers.answer(GOOGLE_TOKEN_URL, googleTokens({ refresh_token: undefined }));
+      providers.answer(GOOGLE_REVOKE_URL, revoked());
+      await callback(noRefresh);
+      const redirected = await startLogin();
+      providers.answer(GOOGLE_TOKEN_URL, redirectTo("https://elsewhere.example/token?leak=google-access-one"));
+      await callback(redirected);
+      const cannotStore = hubEnv({ TOKENS: kvThatCannotStoreTokens() });
+      const unstored = await startLogin(cannotStore);
+      providers.answer(GOOGLE_TOKEN_URL, googleTokens());
+      providers.answer(GOOGLE_REVOKE_URL, new Response("no", { status: 500 }));
+      await callback(unstored, { e: cannotStore });
+      for (const login of [refusedState, denied, failedExchange, noRefresh, redirected, unstored]) {
+        secrets.add(login.state).add(login.challenge).add(cookieValue(login));
+      }
+
+      // Refreshes: one that works, one that fails on the way, one Google refuses.
+      const store = await tokenStore();
+      await store.put("google", connection({ expiresAt: T0 - 1 }));
+      providers.answer(GOOGLE_TOKEN_URL, googleRefreshed({ refresh_token: "google-refresh-two" }));
+      await googleAccessToken(hubEnv(), T0);
+      await store.put("google", connection({ expiresAt: T0 - 1 }));
+      providers.answer(GOOGLE_TOKEN_URL, () => {
+        throw new TypeError("could not reach https://oauth2.googleapis.com/token with google-refresh-one");
+      });
+      await googleAccessToken(hubEnv(), T0).catch(() => undefined);
+      providers.answer(GOOGLE_TOKEN_URL, oauthError("invalid_grant"));
+      await googleAccessToken(hubEnv(), T0).catch(() => undefined);
+
+      // Disconnects: one revoked, one whose revoke fails.
+      await store.put("google", connection());
+      providers.answer(GOOGLE_REVOKE_URL, revoked());
+      await post("/setup/disconnect/google");
+      await store.put("google", connection());
+      providers.answer(GOOGLE_REVOKE_URL, oauthError("invalid_token"));
+      await post("/setup/disconnect/google");
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+
+    // Something was logged for every provider call, so the checks below are about real lines.
+    expect(lines.filter((l) => l.startsWith("provider_call "))).toHaveLength(providers.calls.length);
+    expect(providers.calls.length).toBeGreaterThanOrEqual(10);
+
+    for (const line of lines) {
+      for (const secret of secrets) expect(line, `a secret in: ${line.slice(0, 40)}…`).not.toContain(secret);
+      // Status codes, timings and fixed words only (G6): every line has one of these shapes.
+      expect(line).toMatch(
+        /^(provider_call google\.(token|refresh|revoke) (\d{3}|redirect|timeout|network) \d+ms|login_state_refused [a-z]+|oauth_callback google (connected|failed)|oauth_callback_error [A-Za-z]+)$/,
+      );
+    }
+  });
+});
+
 describe("Provider calls", () => {
   const send = () =>
     providerFetch("test.call", GOOGLE_TOKEN_URL, {
