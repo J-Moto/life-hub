@@ -127,15 +127,21 @@ export async function exchangeGoogleCode(client: GoogleClient, exchange: CodeExc
 /**
  * Asks Google to revoke a token. Revoking a refresh token, or an access token that has one,
  * ends the whole grant. The token goes in the form body, never in the address. Returns
- * whether Google said it was done; never throws.
+ * whether the token is revoked now; never throws.
+ *
+ * A 400 `invalid_token` counts as revoked: the token was revoked already (say, the owner
+ * removed the hub on the Google account page) or has expired, so there is nothing left to
+ * revoke. Google's page gives only "400 with an error code" for errors; `invalid_token` is
+ * what the hub expects, and the step 2 deploy checks confirm it.
  */
 export async function revokeGoogleToken(token: string): Promise<boolean> {
   try {
-    const { status } = await providerFetch("google.revoke", REVOKE_URL, {
+    const { status, json } = await providerFetch("google.revoke", REVOKE_URL, {
       method: "POST",
       headers: FORM_HEADERS,
       body: new URLSearchParams({ token }).toString(),
     });
+    if (status === 400 && errorCode(json) === "invalid_token") return true;
     return status === 200;
   } catch {
     return false;

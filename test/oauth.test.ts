@@ -1116,9 +1116,22 @@ describe("Disconnect", () => {
     expect(Object.fromEntries(providers.calls[1]!.form)).toEqual({ token: "google-access-one" });
   });
 
+  it("a revoke Google refuses because the token is already invalid counts as done", async () => {
+    // The owner removed the hub on the Google account page, or the token lapsed: Google
+    // answers 400 `invalid_token`. No access is left, so the page shows no remove-access note.
+    await putConnection();
+    providers.answer(GOOGLE_REVOKE_URL, oauthError("invalid_token", 400));
+    await expectDisconnected(await post("/setup/disconnect/google"), false);
+    expect(providers.calls.map((c) => c.url)).toEqual([GOOGLE_REVOKE_URL]);
+  });
+
   it("a failed revoke still deletes", async () => {
     const failures = [
-      oauthError("invalid_token", 400),
+      // A 400 that says something else, or nothing readable, is not "already invalid".
+      oauthError("invalid_request", 400),
+      new Response("Bad Request", { status: 400 }),
+      // The same word under another status is not that answer either.
+      oauthError("invalid_token", 401),
       new Response("upstream trouble", { status: 500 }),
       redirectTo("https://elsewhere.example/revoke"),
       () => {
@@ -1352,12 +1365,15 @@ describe("Logs", () => {
       providers.answer(GOOGLE_TOKEN_URL, oauthError("invalid_grant"));
       await googleAccessToken(hubEnv(), T0).catch(() => undefined);
 
-      // Disconnects: one revoked, one whose revoke fails.
+      // Disconnects: one revoked, one whose token Google calls already invalid, one whose revoke fails.
       await store.put("google", connection());
       providers.answer(GOOGLE_REVOKE_URL, revoked());
       await post("/setup/disconnect/google");
       await store.put("google", connection());
       providers.answer(GOOGLE_REVOKE_URL, oauthError("invalid_token"));
+      await post("/setup/disconnect/google");
+      await store.put("google", connection());
+      providers.answer(GOOGLE_REVOKE_URL, new Response("upstream trouble with google-refresh-one", { status: 500 }));
       await post("/setup/disconnect/google");
     } finally {
       for (const spy of spies) spy.mockRestore();
