@@ -23,6 +23,7 @@ Read `docs/design/v1.md` (the plan) and `DESIGN.md` (look and feel) before build
 - Dev: `npm run dev` (fake data + local-only Access skip via `.dev.vars`)
 - Typecheck: `npm run typecheck`
 - Tests: `npm test`
+- Run npm test, npm run typecheck and git diff/status/log as plain commands, with no pipes, redirects or --no-pager, so the allowlist matches.
 
 ## Done means
 - Tests pass, typecheck passes, and you hit the changed route locally with `wrangler dev` and showed the result.
