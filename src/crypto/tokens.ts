@@ -5,8 +5,10 @@
  * additional authenticated data, so a TickTick token can't be swapped into the
  * Google slot without decryption failing.
  *
- * Rotating the key: re-run /setup after setting a new TOKEN_ENC_KEY. Old tokens
- * then fail to decrypt and the dashboard shows "Reconnect".
+ * Changing the key (docs/design/v1.md, G2): Disconnect both services on /setup first, so
+ * both tokens are revoked at the providers; then set the new TOKEN_ENC_KEY; then connect
+ * both. A record left over from the old key fails to decrypt: the dashboard shows
+ * "Reconnect", and Disconnect deletes it without being able to revoke it.
  */
 
 export type Provider = "ticktick" | "google";
@@ -16,7 +18,12 @@ export interface StoredToken {
   refreshToken?: string;
   expiresAt?: number; // epoch ms
   scope?: string;
+  /** When this connection was made (epoch ms). Tells one connection from the next (G5). */
+  connectedAt: number;
 }
+
+/** What is stored for a provider: nothing, a record this key can't read, or a token. */
+export type TokenRead = { status: "none" } | { status: "unreadable" } | { status: "ok"; token: StoredToken };
 
 const VERSION = "v1";
 const IV_BYTES = 12;
@@ -78,34 +85,63 @@ export async function decryptToken(key: CryptoKey, provider: Provider, envelope:
     throw new Error("token_decrypt_failed");
   }
   const parsed = JSON.parse(dec.decode(plain)) as StoredToken;
-  if (typeof parsed.accessToken !== "string") throw new Error("token_envelope_invalid");
+  if (typeof parsed.accessToken !== "string" || typeof parsed.connectedAt !== "number") {
+    throw new Error("token_envelope_invalid");
+  }
   return parsed;
+}
+
+const keyName = (provider: Provider): string => `oauth:${provider}`;
+
+/** Whether anything is stored for a provider. Needs no key, so it sees unreadable records too. */
+export async function tokenRecordExists(kv: KVNamespace, provider: Provider): Promise<boolean> {
+  return (await kv.get(keyName(provider))) !== null;
+}
+
+/** Deletes a provider's record. Needs no key: a record that can't be decrypted can still go. */
+export async function deleteTokenRecord(kv: KVNamespace, provider: Provider): Promise<void> {
+  await kv.delete(keyName(provider));
 }
 
 /** Thin KV wrapper. Only ciphertext ever reaches KV. */
 export class TokenStore {
   constructor(private kv: KVNamespace, private key: CryptoKey) {}
 
-  private keyName(provider: Provider): string {
-    return `oauth:${provider}`;
+  async put(provider: Provider, token: StoredToken): Promise<void> {
+    await this.kv.put(keyName(provider), await encryptToken(this.key, provider, token));
   }
 
-  async put(provider: Provider, token: StoredToken): Promise<void> {
-    await this.kv.put(this.keyName(provider), await encryptToken(this.key, provider, token));
+  async read(provider: Provider): Promise<TokenRead> {
+    const envelope = await this.kv.get(keyName(provider));
+    if (!envelope) return { status: "none" };
+    try {
+      return { status: "ok", token: await decryptToken(this.key, provider, envelope) };
+    } catch {
+      return { status: "unreadable" };
+    }
   }
 
   /** Returns null if nothing is stored or it can't be decrypted (treated as "reconnect needed"). */
   async get(provider: Provider): Promise<StoredToken | null> {
-    const envelope = await this.kv.get(this.keyName(provider));
-    if (!envelope) return null;
-    try {
-      return await decryptToken(this.key, provider, envelope);
-    } catch {
-      return null;
-    }
+    const read = await this.read(provider);
+    return read.status === "ok" ? read.token : null;
   }
 
   async delete(provider: Provider): Promise<void> {
-    await this.kv.delete(this.keyName(provider));
+    await deleteTokenRecord(this.kv, provider);
+  }
+
+  /**
+   * For a connection the provider has refused (G5). Re-reads the record: if it is still the
+   * connection made at `connectedAt`, it is deleted and null comes back. If a newer connection
+   * has replaced it, that one is left alone and handed back. KV can't compare and delete in
+   * one step, so a reconnect that lands between the two can still be deleted (accepted, G6c).
+   */
+  async deleteIfSameConnection(provider: Provider, connectedAt: number): Promise<StoredToken | null> {
+    const current = await this.get(provider);
+    if (!current) return null;
+    if (current.connectedAt !== connectedAt) return current;
+    await this.delete(provider);
+    return null;
   }
 }
